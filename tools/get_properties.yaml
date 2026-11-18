@@ -40,8 +40,8 @@ parameters:
       en_US: Property Namespace
       zh_Hans: 属性命名空间
     human_description:
-      en_US: XML namespace applied to plain property names (default 'urn:dify:webdav-tools'). For example, use 'http://owncloud.org/ns' for Nextcloud/ownCloud properties.
-      zh_Hans: 不带命名空间的属性名所使用的 XML 命名空间（默认 'urn:dify:webdav-tools'）；例如 Nextcloud/ownCloud 的属性使用 'http://owncloud.org/ns'。
+      en_US: XML namespace applied to plain property names (default 'urn:dify:webdav-tools'). Nextcloud and ownCloud properties use their own namespace instead of this default.
+      zh_Hans: 不带命名空间的属性名所使用的 XML 命名空间（默认 'urn:dify:webdav-tools'）。Nextcloud 和 ownCloud 的属性使用各自的命名空间，而不是这个默认值。
     llm_description: XML namespace for plain property names; defaults to 'urn:dify:webdav-tools'.
     form: llm
 output_schema:
