@@ -1,0 +1,108 @@
+identity:
+  author: csersoft
+  name: webdav_tools
+  label:
+    en_US: WebDAV Tools
+    zh_Hans: WebDAV 工具集
+  description:
+    en_US: Connect Dify workflows and agents to a WebDAV directory to browse, read, write, upload, download, and manage remote files
+    zh_Hans: 将 Dify 工作流与智能体连接到 WebDAV 目录，支持浏览、读写、上传下载及管理远端文件与文件夹
+  icon: icon.svg
+  icon_dark: icon-dark.svg
+  tags:
+    - utilities
+    - productivity
+credentials_for_provider:
+  base_url:
+    type: text-input
+    required: true
+    label:
+      en_US: WebDAV Root URL
+      zh_Hans: WebDAV 根目录地址
+    placeholder:
+      en_US: "https://dav.example.com/dav/files/alice/"
+      zh_Hans: "https://dav.example.com/dav/files/alice/"
+    help:
+      en_US: Full HTTP(S) URL of the root WebDAV directory. All tool paths are resolved relative to this URL.
+      zh_Hans: 完整的 HTTP(S) WebDAV 根目录地址，所有工具中的路径均相对于该目录解析。
+  auth_type:
+    type: select
+    required: false
+    default: basic
+    label:
+      en_US: Authentication Type
+      zh_Hans: 认证方式
+    help:
+      en_US: Choose Basic (most common, e.g. Nextcloud, Alist), Digest (IIS, Apache, NAS), or Bearer Token.
+      zh_Hans: 选择认证方式：Basic（最常用，如 Nextcloud、坚果云、Alist）、Digest（部分 NAS、IIS、Apache）或 Bearer 令牌。
+    options:
+      - value: basic
+        label:
+          en_US: HTTP Basic Auth
+          zh_Hans: HTTP Basic 基本认证
+      - value: digest
+        label:
+          en_US: HTTP Digest Auth
+          zh_Hans: HTTP Digest 摘要认证
+      - value: bearer
+        label:
+          en_US: Bearer Token
+          zh_Hans: Bearer Token 令牌认证
+  username:
+    type: text-input
+    required: false
+    label:
+      en_US: Username
+      zh_Hans: 用户名
+    placeholder:
+      en_US: "alice"
+      zh_Hans: "alice"
+    help:
+      en_US: Required for HTTP Basic and Digest authentication. Leave empty when using Bearer Token.
+      zh_Hans: 使用 Basic 或 Digest 认证时必填；使用 Bearer 令牌认证时可留空。
+  password:
+    type: secret-input
+    required: true
+    label:
+      en_US: Password / App Password / Token
+      zh_Hans: 密码 / 应用专用密码 / 访问令牌
+    help:
+      en_US: Account password, app-specific password, or Bearer access token depending on Authentication Type.
+      zh_Hans: 根据所选认证方式填写账户密码、应用专用密码或 Bearer 访问令牌。
+  verify_ssl:
+    type: boolean
+    required: false
+    default: true
+    label:
+      en_US: Verify SSL Certificate
+      zh_Hans: 验证 SSL/TLS 证书
+    help:
+      en_US: Verify HTTPS server certificates. Disable only for trusted internal NAS or self-signed certificates.
+      zh_Hans: 默认验证 HTTPS 服务端证书；仅在连接受信任的内网 NAS 或自签名证书环境时关闭。
+  timeout:
+    type: text-input
+    required: false
+    default: "30"
+    label:
+      en_US: Request Timeout (seconds)
+      zh_Hans: 请求超时时间（秒）
+    placeholder:
+      en_US: "30"
+      zh_Hans: "30"
+    help:
+      en_US: Per-request timeout in seconds (between 5 and 300).
+      zh_Hans: 单次请求的超时秒数（取值范围 5–300）。
+tools:
+  - tools/list_files.yaml
+  - tools/stat_item.yaml
+  - tools/download_file.yaml
+  - tools/upload_file.yaml
+  - tools/read_text_file.yaml
+  - tools/write_text_file.yaml
+  - tools/create_directory.yaml
+  - tools/move_item.yaml
+  - tools/copy_item.yaml
+  - tools/delete_item.yaml
+extra:
+  python:
+    source: provider/webdav_tools.py

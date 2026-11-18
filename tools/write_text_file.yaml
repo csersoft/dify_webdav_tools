@@ -1,0 +1,118 @@
+identity:
+  author: csersoft
+  name: write_text_file
+  label:
+    en_US: Write Text File
+    zh_Hans: 写入文本文件
+description:
+  human:
+    en_US: Write, create, or append string content (Markdown, JSON, CSV, plain text) directly to a WebDAV file without converting it to a file variable first.
+    zh_Hans: 直接将字符串文本（Markdown、JSON、CSV、纯文本等）创建、覆盖写入或追加到 WebDAV 文件中，无需先转换成文件变量。
+  llm: Create, overwrite, or append plain-text content directly to a file on WebDAV.
+parameters:
+  - name: path
+    type: string
+    required: true
+    label:
+      en_US: Target Relative Path
+      zh_Hans: 目标文件相对路径
+    human_description:
+      en_US: Relative path of the text file on WebDAV (e.g. 'notes/summary.md').
+      zh_Hans: WebDAV 上的目标文本文件相对路径（例如 'notes/summary.md'）。
+    llm_description: Relative file path on WebDAV to write text into.
+    form: llm
+  - name: content
+    type: string
+    required: true
+    label:
+      en_US: Text Content
+      zh_Hans: 文本内容
+    human_description:
+      en_US: String content to write or append to the target file.
+      zh_Hans: 要写入或追加到目标文件中的字符串文本内容。
+    llm_description: Text string content to write to the WebDAV file.
+    form: llm
+  - name: mode
+    type: select
+    required: false
+    default: overwrite
+    label:
+      en_US: Write Mode
+      zh_Hans: 写入模式
+    human_description:
+      en_US: Choose 'overwrite' (create or replace), 'create' (fail if file exists), or 'append' (append to existing file).
+      zh_Hans: 选择写入模式：覆盖写入（不存在则新建）、仅新建（已存在则报错）或追加写入（在末尾追加内容）。
+    llm_description: Write mode ('overwrite', 'create', or 'append').
+    form: llm
+    options:
+      - value: overwrite
+        label:
+          en_US: Overwrite (Create or Replace)
+          zh_Hans: 覆盖写入（不存在则新建）
+      - value: create
+        label:
+          en_US: Create Only (Do Not Overwrite)
+          zh_Hans: 仅新建（禁止覆盖已有文件）
+      - value: append
+        label:
+          en_US: Append to End
+          zh_Hans: 追加到文件末尾
+  - name: encoding
+    type: string
+    required: false
+    default: utf-8
+    label:
+      en_US: Character Encoding
+      zh_Hans: 字符编码
+    human_description:
+      en_US: Character encoding used to encode the text (default 'utf-8').
+      zh_Hans: 编码文本所使用的字符集（默认 'utf-8'）。
+    llm_description: Character encoding name, defaulting to utf-8.
+    form: form
+  - name: content_type
+    type: string
+    required: false
+    label:
+      en_US: Custom Content-Type
+      zh_Hans: 自定义 Content-Type
+    human_description:
+      en_US: Optional MIME type header; automatically inferred from file extension when left empty.
+      zh_Hans: 可选 MIME 类型头；留空时将根据文件后缀名自动推断。
+    llm_description: Optional Content-Type header override.
+    form: form
+  - name: create_parents
+    type: boolean
+    required: false
+    default: true
+    label:
+      en_US: Auto-Create Parent Directories
+      zh_Hans: 自动创建父目录
+    human_description:
+      en_US: Automatically create missing parent directories via MKCOL before writing.
+      zh_Hans: 写入前若目标父目录不存在，自动通过 MKCOL 递归创建。
+    llm_description: Automatically create missing parent directories.
+    form: form
+output_schema:
+  type: object
+  properties:
+    path:
+      type: string
+      description: Normalized relative file path written
+    size:
+      type: number
+      description: Final byte size of the remote file after writing
+    mode:
+      type: string
+      description: Write mode executed ('overwrite', 'create', or 'append')
+    content_type:
+      type: string
+      description: Content-Type stored for the file
+    etag:
+      type: string
+      description: New ETag returned by the server
+    created_parents:
+      type: boolean
+      description: Whether missing parent directories were created
+extra:
+  python:
+    source: tools/write_text_file.py

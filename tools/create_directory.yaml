@@ -1,0 +1,50 @@
+identity:
+  author: csersoft
+  name: create_directory
+  label:
+    en_US: Create Directory
+    zh_Hans: 创建目录
+description:
+  human:
+    en_US: Create a directory on WebDAV via MKCOL, optionally creating missing parent directories recursively.
+    zh_Hans: 通过 MKCOL 在 WebDAV 上创建文件夹，支持自动递归创建缺失的上级父目录。
+  llm: Create a directory (and optionally its missing parent folders) on the WebDAV server. Succeeds without error if the directory already exists.
+parameters:
+  - name: path
+    type: string
+    required: true
+    label:
+      en_US: Directory Relative Path
+      zh_Hans: 目录相对路径
+    human_description:
+      en_US: Relative directory path to create (e.g. 'archive/2026/11').
+      zh_Hans: 需要创建的目录相对路径（例如 'archive/2026/11'）。
+    llm_description: Relative path of the directory to create on WebDAV.
+    form: llm
+  - name: parents
+    type: boolean
+    required: false
+    default: true
+    label:
+      en_US: Create Parent Directories
+      zh_Hans: 递归创建父目录
+    human_description:
+      en_US: Create missing intermediate parent directories automatically (similar to 'mkdir -p').
+      zh_Hans: 自动创建路径中不存在的中间父级目录（类似 'mkdir -p'）。
+    llm_description: Whether to recursively create missing parent folders.
+    form: form
+output_schema:
+  type: object
+  properties:
+    path:
+      type: string
+      description: Normalized relative path of the directory
+    created:
+      type: boolean
+      description: True if newly created, false if it already existed
+    already_exists:
+      type: boolean
+      description: True if the directory already existed prior to this call
+extra:
+  python:
+    source: tools/create_directory.py

@@ -1,0 +1,76 @@
+identity:
+  author: csersoft
+  name: read_text_file
+  label:
+    en_US: Read Text File
+    zh_Hans: 读取文本文件
+description:
+  human:
+    en_US: Read a plain-text file (Markdown, JSON, CSV, YAML, logs, code) directly from WebDAV as a string variable.
+    zh_Hans: 直接从 WebDAV 读取纯文本文件（如 Markdown、JSON、CSV、YAML、日志、代码等）并输出为字符串变量。
+  llm: Read and decode a text file from WebDAV directly as string content without needing a separate document extractor node.
+parameters:
+  - name: path
+    type: string
+    required: true
+    label:
+      en_US: Relative File Path
+      zh_Hans: 文件相对路径
+    human_description:
+      en_US: Relative path to the text file on the WebDAV server (e.g. 'notes/todo.md').
+      zh_Hans: WebDAV 上的文本文件相对路径（例如 'notes/todo.md'）。
+    llm_description: Relative path to the text file to read from WebDAV.
+    form: llm
+  - name: encoding
+    type: string
+    required: false
+    default: utf-8
+    label:
+      en_US: Character Encoding
+      zh_Hans: 字符编码
+    human_description:
+      en_US: Text encoding used to decode the file (e.g. 'utf-8', 'utf-8-sig', 'gb18030').
+      zh_Hans: 解码文件所用的字符编码（例如 'utf-8'、'utf-8-sig'、'gb18030'）。
+    llm_description: Text encoding name, defaulting to utf-8.
+    form: form
+  - name: max_chars
+    type: number
+    required: false
+    default: 100000
+    min: 100
+    max: 2000000
+    label:
+      en_US: Max Characters
+      zh_Hans: 最大读取字符数
+    human_description:
+      en_US: Truncate decoded text if it exceeds this character limit (100–2,000,000).
+      zh_Hans: 解码后的文本若超过该字符数上限将被截断（100–2,000,000）。
+    llm_description: Maximum number of characters to return.
+    form: form
+output_schema:
+  type: object
+  properties:
+    path:
+      type: string
+      description: Normalized relative file path read
+    content:
+      type: string
+      description: Decoded text content of the file
+    size:
+      type: number
+      description: Raw byte size of the remote file
+    total_chars:
+      type: number
+      description: Total decoded character count before truncation
+    truncated:
+      type: boolean
+      description: Whether the returned content was truncated to max_chars
+    etag:
+      type: string
+      description: Server ETag of the file
+    last_modified:
+      type: string
+      description: Last-Modified timestamp of the file
+extra:
+  python:
+    source: tools/read_text_file.py

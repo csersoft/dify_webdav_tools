@@ -1,0 +1,134 @@
+identity:
+  author: csersoft
+  name: list_files
+  label:
+    en_US: List Directory
+    zh_Hans: 列举目录
+description:
+  human:
+    en_US: List files and subdirectories in a WebDAV directory, with optional recursive traversal, glob filtering, and result cap.
+    zh_Hans: 列出 WebDAV 目录中的文件和子目录，支持可选的递归遍历、通配符筛选与数量上限控制。
+  llm: List files and subdirectories in a WebDAV directory. Leave path empty for the root directory. Supports recursive listing, glob pattern filtering (e.g. '*.md'), and filtering by file or directory.
+parameters:
+  - name: path
+    type: string
+    required: false
+    label:
+      en_US: Relative Directory Path
+      zh_Hans: 目录相对路径
+    human_description:
+      en_US: Directory path relative to the WebDAV root. Leave empty or '/' for the root directory.
+      zh_Hans: 相对于 WebDAV 根目录的路径；留空或填 '/' 表示根目录。
+    llm_description: Relative directory path under the WebDAV root. Leave empty for the root directory.
+    form: llm
+  - name: recursive
+    type: boolean
+    required: false
+    default: false
+    label:
+      en_US: Recursive Traversal
+      zh_Hans: 递归遍历子目录
+    human_description:
+      en_US: Recursively list items inside subdirectories up to Max Depth.
+      zh_Hans: 开启后将按最大遍历深度递归列出子目录中的内容。
+    llm_description: Set to true to recursively traverse subdirectories.
+    form: llm
+  - name: pattern
+    type: string
+    required: false
+    label:
+      en_US: Glob Filter Pattern
+      zh_Hans: 通配符筛选规则
+    human_description:
+      en_US: Case-insensitive glob pattern matched against entry name or path (e.g. '*.pdf', '*2026*').
+      zh_Hans: 不区分大小写的通配符匹配规则，可匹配文件名或相对路径（如 '*.pdf'、'*2026*'）。
+    llm_description: Optional case-insensitive glob filter such as '*.pdf' or '*report*'.
+    form: llm
+  - name: entry_type
+    type: select
+    required: false
+    default: all
+    label:
+      en_US: Entry Type Filter
+      zh_Hans: 条目类型筛选
+    human_description:
+      en_US: Return both files and directories, only files, or only directories.
+      zh_Hans: 选择返回全部条目、仅文件或仅目录。
+    llm_description: Filter results by item type ('all', 'file', or 'directory').
+    form: llm
+    options:
+      - value: all
+        label:
+          en_US: All (Files & Directories)
+          zh_Hans: 全部（文件与目录）
+      - value: file
+        label:
+          en_US: Files Only
+          zh_Hans: 仅文件
+      - value: directory
+        label:
+          en_US: Directories Only
+          zh_Hans: 仅目录
+  - name: max_depth
+    type: number
+    required: false
+    default: 3
+    min: 1
+    max: 10
+    label:
+      en_US: Max Recursion Depth
+      zh_Hans: 最大递归深度
+    human_description:
+      en_US: Maximum directory depth when Recursive Traversal is enabled (1–10).
+      zh_Hans: 开启递归遍历时的最大目录层级深度（1–10）。
+    llm_description: Maximum recursion depth between 1 and 10 when recursive is true.
+    form: form
+  - name: limit
+    type: number
+    required: false
+    default: 200
+    min: 1
+    max: 2000
+    label:
+      en_US: Max Entries
+      zh_Hans: 最大返回条数
+    human_description:
+      en_US: Maximum number of entries to return (1–2000) to avoid oversized outputs.
+      zh_Hans: 单次最多返回的条目数量（1–2000），避免大目录撑爆上下文。
+    llm_description: Maximum number of items returned (1 to 2000).
+    form: form
+output_schema:
+  type: object
+  properties:
+    path:
+      type: string
+      description: Normalized relative directory path listed
+    count:
+      type: number
+      description: Number of entries returned
+    truncated:
+      type: boolean
+      description: True if more items existed beyond limit or scan budget
+    entries:
+      type: array
+      description: Matched WebDAV directory and file entries
+      items:
+        type: object
+        properties:
+          name:
+            type: string
+          path:
+            type: string
+          type:
+            type: string
+          size:
+            type: number
+          content_type:
+            type: string
+          etag:
+            type: string
+          last_modified:
+            type: string
+extra:
+  python:
+    source: tools/list_files.py

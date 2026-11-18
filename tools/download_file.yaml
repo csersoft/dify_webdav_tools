@@ -1,0 +1,47 @@
+identity:
+  author: csersoft
+  name: download_file
+  label:
+    en_US: Download File
+    zh_Hans: 下载文件
+description:
+  human:
+    en_US: Download a file from WebDAV and output it as a Dify file variable along with its metadata.
+    zh_Hans: 从 WebDAV 下载指定文件，输出为 Dify 文件变量并返回文件元数据。
+  llm: Download a binary or document file from WebDAV as a Dify file object so downstream nodes or models can process it.
+parameters:
+  - name: path
+    type: string
+    required: true
+    label:
+      en_US: Relative File Path
+      zh_Hans: 文件相对路径
+    human_description:
+      en_US: Relative path to the file on the WebDAV server (up to 64 MiB).
+      zh_Hans: WebDAV 服务器上的文件相对路径（单文件最大 64 MiB）。
+    llm_description: Relative path to the file to download from WebDAV.
+    form: llm
+output_schema:
+  type: object
+  properties:
+    path:
+      type: string
+      description: Normalized relative file path downloaded
+    filename:
+      type: string
+      description: Downloaded file name
+    mime_type:
+      type: string
+      description: Resolved MIME type of the downloaded file
+    size:
+      type: number
+      description: File size in bytes
+    etag:
+      type: string
+      description: Server ETag of the downloaded file
+    last_modified:
+      type: string
+      description: Last-Modified header or WebDAV property value
+extra:
+  python:
+    source: tools/download_file.py

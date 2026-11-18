@@ -1,0 +1,53 @@
+identity:
+  author: csersoft
+  name: stat_item
+  label:
+    en_US: Get Item Info
+    zh_Hans: 获取文件或目录信息
+description:
+  human:
+    en_US: Check whether a file or directory exists on WebDAV and retrieve its metadata (type, size, MIME type, ETag, last modified time).
+    zh_Hans: 检查 WebDAV 上的文件或目录是否存在，并获取其元数据（类型、大小、MIME 类型、ETag、最后修改时间）。
+  llm: Inspect a WebDAV path without downloading its body. Returns exists=false instead of an error if the path does not exist, otherwise returns type, size, content_type, etag, and last_modified.
+parameters:
+  - name: path
+    type: string
+    required: false
+    label:
+      en_US: Relative Path
+      zh_Hans: 相对路径
+    human_description:
+      en_US: Relative file or directory path to inspect. Leave empty or '/' to inspect the WebDAV root.
+      zh_Hans: 要查询的文件或目录相对路径；留空或填 '/' 可检查 WebDAV 根目录。
+    llm_description: Relative path of the file or directory to inspect.
+    form: llm
+output_schema:
+  type: object
+  properties:
+    exists:
+      type: boolean
+      description: Whether the target resource exists on the WebDAV server
+    path:
+      type: string
+      description: Normalized relative path
+    name:
+      type: string
+      description: Base name of the file or directory
+    type:
+      type: string
+      description: Resource type ('file', 'directory', or empty when missing)
+    size:
+      type: number
+      description: File size in bytes (0 for directories or missing resources)
+    content_type:
+      type: string
+      description: Resolved MIME content type for files
+    etag:
+      type: string
+      description: Resource ETag returned by the server
+    last_modified:
+      type: string
+      description: Last-Modified timestamp string returned by the server
+extra:
+  python:
+    source: tools/stat_item.py

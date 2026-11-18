@@ -1,0 +1,79 @@
+identity:
+  author: csersoft
+  name: copy_item
+  label:
+    en_US: Copy Item
+    zh_Hans: 复制文件或目录
+description:
+  human:
+    en_US: Copy a file or directory on WebDAV via the COPY method without downloading and re-uploading.
+    zh_Hans: 通过 WebDAV COPY 方法直接在远端复制文件或整个目录，无需下载再上传。
+  llm: Copy a file or directory from source_path to destination_path directly on the WebDAV server.
+parameters:
+  - name: source_path
+    type: string
+    required: true
+    label:
+      en_US: Source Relative Path
+      zh_Hans: 源相对路径
+    human_description:
+      en_US: Existing relative path of the file or directory to copy.
+      zh_Hans: 要复制的源文件或目录相对路径。
+    llm_description: Relative source path of the file or directory to copy.
+    form: llm
+  - name: destination_path
+    type: string
+    required: true
+    label:
+      en_US: Destination Relative Path
+      zh_Hans: 目标相对路径
+    human_description:
+      en_US: Target relative path for the copy (including target file or folder name).
+      zh_Hans: 复制后的目标相对路径（需包含目标文件或目录名）。
+    llm_description: Relative destination path for the copied item.
+    form: llm
+  - name: overwrite
+    type: boolean
+    required: false
+    default: false
+    label:
+      en_US: Overwrite Destination
+      zh_Hans: 覆盖目标同名项
+    human_description:
+      en_US: Allow replacing an existing resource at the destination path.
+      zh_Hans: 开启后允许覆盖目标路径上已存在的同名文件或目录。
+    llm_description: Allow overwriting an existing item at destination_path.
+    form: form
+  - name: create_parents
+    type: boolean
+    required: false
+    default: true
+    label:
+      en_US: Auto-Create Destination Parents
+      zh_Hans: 自动创建目标父目录
+    human_description:
+      en_US: Automatically create missing parent directories of Destination Relative Path.
+      zh_Hans: 若目标路径的上级父目录不存在，自动递归创建。
+    llm_description: Automatically create missing parent directories for destination_path.
+    form: form
+output_schema:
+  type: object
+  properties:
+    source_path:
+      type: string
+      description: Normalized relative source path
+    destination_path:
+      type: string
+      description: Normalized relative destination path
+    type:
+      type: string
+      description: Copied resource type ('file' or 'directory')
+    overwritten:
+      type: boolean
+      description: Whether an existing destination resource was overwritten
+    created_parents:
+      type: boolean
+      description: Whether missing destination parent directories were created
+extra:
+  python:
+    source: tools/copy_item.py

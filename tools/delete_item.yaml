@@ -1,0 +1,50 @@
+identity:
+  author: csersoft
+  name: delete_item
+  label:
+    en_US: Delete Item
+    zh_Hans: 删除文件或目录
+description:
+  human:
+    en_US: Delete a file or directory on WebDAV via the DELETE method (refuses to delete the WebDAV root).
+    zh_Hans: 通过 WebDAV DELETE 方法删除远端文件或目录（禁止删除配置的根目录本身）。
+  llm: Permanently delete a file or directory at a non-empty relative path on the WebDAV server.
+parameters:
+  - name: path
+    type: string
+    required: true
+    label:
+      en_US: Target Relative Path
+      zh_Hans: 目标相对路径
+    human_description:
+      en_US: Non-empty relative path of the file or directory to delete.
+      zh_Hans: 需要删除的文件或目录相对路径（不可为空或根目录）。
+    llm_description: Non-empty relative path of the file or directory to delete.
+    form: llm
+  - name: missing_ok
+    type: boolean
+    required: false
+    default: false
+    label:
+      en_US: Ignore Missing Target
+      zh_Hans: 忽略不存在的目标
+    human_description:
+      en_US: Succeed with deleted=false instead of raising an error when the target path does not exist.
+      zh_Hans: 开启后若目标不存在不会报错，而是返回 deleted=false。
+    llm_description: If true, do not fail when the target path is already absent.
+    form: form
+output_schema:
+  type: object
+  properties:
+    path:
+      type: string
+      description: Normalized relative path targeted for deletion
+    deleted:
+      type: boolean
+      description: True if an existing resource was deleted, false if already absent
+    type:
+      type: string
+      description: Deleted resource type ('file', 'directory', or empty if absent)
+extra:
+  python:
+    source: tools/delete_item.py

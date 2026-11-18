@@ -1,0 +1,90 @@
+identity:
+  author: csersoft
+  name: upload_file
+  label:
+    en_US: Upload File
+    zh_Hans: 上传文件
+description:
+  human:
+    en_US: Upload a Dify file variable to WebDAV, supporting automatic parent directory creation, overwrite protection, and ETag precondition checks.
+    zh_Hans: 将 Dify 文件变量上传至 WebDAV，支持自动创建父级目录、防覆盖保护及 ETag 条件更新校验。
+  llm: Upload an upstream Dify file to a relative file path (or directory path ending with '/') on the WebDAV server.
+parameters:
+  - name: path
+    type: string
+    required: true
+    label:
+      en_US: Target Relative Path
+      zh_Hans: 目标相对路径
+    human_description:
+      en_US: Relative destination file path (e.g. 'reports/q4.pdf'), or directory path ending with '/' to keep the original filename.
+      zh_Hans: 目标文件的相对路径（如 'reports/q4.pdf'）；若以 '/' 结尾则自动沿用原文件名。
+    llm_description: Relative destination file path on WebDAV, or a folder path ending with '/' to keep the file's original filename.
+    form: llm
+  - name: file
+    type: file
+    required: true
+    label:
+      en_US: Source File
+      zh_Hans: 源文件
+    human_description:
+      en_US: Single file variable from an upstream Dify node (up to 64 MiB).
+      zh_Hans: 选择来自上游节点的单个 Dify 文件变量（最大 64 MiB）。
+    llm_description: Upstream Dify file object to upload.
+    form: llm
+  - name: overwrite
+    type: boolean
+    required: false
+    default: false
+    label:
+      en_US: Overwrite Existing File
+      zh_Hans: 覆盖同名文件
+    human_description:
+      en_US: Allow replacing an existing remote file at the same path.
+      zh_Hans: 开启后允许覆盖并替换远端已有的同名文件。
+    llm_description: Allow overwriting an existing file at the destination path.
+    form: form
+  - name: create_parents
+    type: boolean
+    required: false
+    default: true
+    label:
+      en_US: Auto-Create Parent Directories
+      zh_Hans: 自动创建父目录
+    human_description:
+      en_US: Automatically create missing parent directories via MKCOL before uploading.
+      zh_Hans: 上传前若目标父目录不存在，自动通过 MKCOL 递归创建。
+    llm_description: Automatically create missing parent folders before upload.
+    form: form
+  - name: if_match_etag
+    type: string
+    required: false
+    label:
+      en_US: Expected ETag (If-Match)
+      zh_Hans: 期望的 ETag（条件更新）
+    human_description:
+      en_US: Optional ETag for optimistic concurrency; upload succeeds only if the remote file still has this ETag.
+      zh_Hans: 可选乐观锁条件；仅当远端文件当前 ETag 与该值一致时才执行更新。
+    llm_description: Optional remote ETag required via If-Match before updating an existing file.
+    form: llm
+output_schema:
+  type: object
+  properties:
+    path:
+      type: string
+      description: Final normalized relative file path on WebDAV
+    size:
+      type: number
+      description: Uploaded byte count
+    content_type:
+      type: string
+      description: Content-Type sent with PUT
+    etag:
+      type: string
+      description: New ETag returned by the WebDAV server
+    created_parents:
+      type: boolean
+      description: Whether missing parent directories were created automatically
+extra:
+  python:
+    source: tools/upload_file.py
