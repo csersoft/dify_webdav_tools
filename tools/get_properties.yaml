@@ -1,0 +1,87 @@
+identity:
+  author: csersoft
+  name: get_properties
+  label:
+    en_US: Get Properties
+    zh_Hans: 读取属性
+description:
+  human:
+    en_US: "Read WebDAV properties of a file or directory, including custom properties written via PROPPATCH. Leave the name list empty to read every property outside the DAV: namespace, which may also include server-specific extensions (such as Nextcloud's oc:fileid)."
+    zh_Hans: "读取 WebDAV 文件或目录的属性，包括通过 PROPPATCH 写入的自定义属性。属性名列表留空时读取全部非 DAV: 命名空间的属性，其中可能包含服务器自带的扩展属性（如 Nextcloud 的 oc:fileid）。"
+  llm: "Read WebDAV properties of a file or directory. Pass property names (plain names use the namespace parameter, or Clark notation '{namespace}name' such as '{DAV:}getetag'), or leave names empty to list every non-DAV: property with its value; that list may include server-specific extension properties besides user-written custom ones."
+parameters:
+  - name: path
+    type: string
+    required: false
+    label:
+      en_US: Relative Path
+      zh_Hans: 相对路径
+    human_description:
+      en_US: Relative path of the file or directory. Leave empty or '/' for the WebDAV root.
+      zh_Hans: 文件或目录的相对路径；留空或填 '/' 表示 WebDAV 根目录。
+    llm_description: Relative path of the file or directory whose properties to read.
+    form: llm
+  - name: names
+    type: string
+    required: false
+    label:
+      en_US: Property Names
+      zh_Hans: 属性名列表
+    human_description:
+      en_US: "Comma-separated names or a JSON array (e.g. 'category, reviewed' or '[\"{DAV:}getetag\"]'). Leave empty to read all non-DAV: properties."
+      zh_Hans: "以逗号分隔的属性名或 JSON 数组（如 'category, reviewed' 或 '[\"{DAV:}getetag\"]'）；留空则读取全部非 DAV: 命名空间的属性。"
+    llm_description: "Optional comma-separated property names or JSON array. Plain names use the namespace parameter; use '{namespace}name' for other namespaces. Empty means all non-DAV: properties."
+    form: llm
+  - name: namespace
+    type: string
+    required: false
+    default: urn:dify:webdav-tools
+    label:
+      en_US: Property Namespace
+      zh_Hans: 属性命名空间
+    human_description:
+      en_US: XML namespace applied to plain property names (default 'urn:dify:webdav-tools'). For example, use 'http://owncloud.org/ns' for Nextcloud/ownCloud properties.
+      zh_Hans: 不带命名空间的属性名所使用的 XML 命名空间（默认 'urn:dify:webdav-tools'）；例如 Nextcloud/ownCloud 的属性使用 'http://owncloud.org/ns'。
+    llm_description: XML namespace for plain property names; defaults to 'urn:dify:webdav-tools'.
+    form: llm
+output_schema:
+  type: object
+  properties:
+    path:
+      type: string
+      description: Normalized relative path
+    type:
+      type: string
+      description: Resource type ('file' or 'directory')
+    namespace:
+      type: string
+      description: Namespace used for plain property names
+    count:
+      type: number
+      description: Number of properties found
+    properties:
+      type: array
+      description: Found properties with their namespace and value
+      items:
+        type: object
+        properties:
+          name:
+            type: string
+          namespace:
+            type: string
+          value:
+            type: string
+    values:
+      type: object
+      description: Property values keyed by plain name (default namespace) or '{namespace}name'
+    missing:
+      type: array
+      description: Requested properties that the server does not have
+      items:
+        type: string
+    truncated:
+      type: boolean
+      description: "True if more non-DAV: properties existed than could be returned in one call"
+extra:
+  python:
+    source: tools/get_properties.py

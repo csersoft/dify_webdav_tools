@@ -22,9 +22,9 @@ class ReadTextFile(Tool):
         with WebDAV(self.runtime.credentials) as client:
             result = client.read_text(path, encoding=encoding, max_chars=max_chars)
 
-        # Return the file text in the text message so LLM agents can read it directly,
-        # while also exposing structured variables for Workflow nodes.
+        # Agents receive both text and JSON messages, so the file text goes only into
+        # the text message to avoid sending it to the LLM twice.
         yield self.create_text_message(result["content"])
-        yield self.create_json_message(result)
+        yield self.create_json_message({k: v for k, v in result.items() if k != "content"})
         for key, value in result.items():
             yield self.create_variable_message(key, value)

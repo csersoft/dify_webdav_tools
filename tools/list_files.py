@@ -39,6 +39,8 @@ class ListFiles(Tool):
             )
 
         target_label = f"'{result['path']}'" if result["path"] else "'/'"
-        trunc_note = " (truncated)" if result["truncated"] else ""
+        trunc_note = (
+            f" (truncated: {result['truncated_reason']})" if result["truncated"] else ""
+        )
         summary = f"Listed {result['count']} item(s) under {target_label}{trunc_note}."
         yield from emit_result(self, result, summary)

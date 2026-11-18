@@ -109,6 +109,9 @@ output_schema:
     truncated:
       type: boolean
       description: True if more items existed beyond limit or scan budget
+    truncated_reason:
+      type: string
+      description: "Why the listing stopped early: 'limit' (item limit reached), 'max_scan_dirs' (too many directories scanned), 'time_budget' (scan time budget exceeded), or empty if complete"
     entries:
       type: array
       description: Matched WebDAV directory and file entries

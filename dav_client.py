@@ -3,19 +3,34 @@
 from __future__ import annotations
 
 import fnmatch
+import io
+import json
 import mimetypes
+import re
+import time
 from collections import deque
+from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import quote, unquote, urljoin, urlsplit
+from xml.etree import ElementTree as XmlBuilder
 
 import httpx
 from defusedxml import ElementTree
 
 DAV_NS = "{DAV:}"
-MAX_FILE_BYTES = 64 * 1024 * 1024  # 64 MiB single-file transfer limit
-MAX_XML_BYTES = 8 * 1024 * 1024  # 8 MiB multistatus XML response limit
+MIB = 1024 * 1024
+# Matches the default PLUGIN_MAX_FILE_SIZE of the Dify API service, which caps
+# files returned by plugins (download_file blobs).
+DEFAULT_MAX_FILE_MB = 50
+MAX_FILE_MB_LIMIT = 128  # one transfer peaks at ~2x file size; see manifest resource.memory
+MAX_XML_BYTES = 8 * MIB  # 8 MiB multistatus XML response limit
+MAX_ERROR_BODY_BYTES = 4096
+MAX_DISCARD_BYTES = 64 * 1024
 MAX_REDIRECTS = 3
 MAX_SCAN_DIRS = 250
+MAX_NAME_BYTES = 255
+LIST_TIME_BUDGET_SEC = 120.0
+READ_ONLY_METHODS = frozenset({"GET", "HEAD", "OPTIONS", "PROPFIND"})
 
 PROPFIND_BODY = (
     b'<?xml version="1.0" encoding="utf-8"?>'
@@ -24,6 +39,30 @@ PROPFIND_BODY = (
     b"<getcontenttype/><getetag/>"
     b"</prop></propfind>"
 )
+
+STATUS_PROPFIND_BODY = (
+    b'<?xml version="1.0" encoding="utf-8"?>'
+    b'<propfind xmlns="DAV:"><prop>'
+    b"<resourcetype/><quota-available-bytes/><quota-used-bytes/>"
+    b"</prop></propfind>"
+)
+
+ANY_STATUS = frozenset(range(100, 600))
+
+PROPNAME_BODY = (
+    b'<?xml version="1.0" encoding="utf-8"?><propfind xmlns="DAV:"><propname/></propfind>'
+)
+ALLPROP_BODY = (
+    b'<?xml version="1.0" encoding="utf-8"?><propfind xmlns="DAV:"><allprop/></propfind>'
+)
+DEFAULT_PROP_NS = "urn:dify:webdav-tools"
+MAX_PROPS_PER_CALL = 100
+MAX_PROP_VALUE_CHARS = 65536
+_PROP_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9._-]*$")
+_CLARK_RE = re.compile(r"^\{([^{}]*)\}(.*)$")
+_XML_INVALID_CHARS = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f\ufffe\uffff]")
+
+XmlBuilder.register_namespace("d", "DAV:")
 
 GENERIC_MIMES = frozenset(
     {
@@ -241,6 +280,13 @@ def normalize_rel_path(path: str | None, *, allow_empty: bool = False) -> str:
             continue
         if segment == "..":
             raise ValueError("Parent directory traversal ('..') is not allowed.")
+        # Servers fail inconsistently past the common 255-byte filesystem name limit
+        # (rclone 405, Apache 403, nginx 500).
+        if len(segment.encode("utf-8")) > MAX_NAME_BYTES:
+            raise ValueError(
+                f"Name '{segment[:40]}...' is longer than {MAX_NAME_BYTES} bytes (UTF-8), "
+                "which most WebDAV servers and filesystems reject."
+            )
         parts.append(segment)
 
     if not parts:
@@ -276,13 +322,210 @@ def guess_mime_type(path: str, reported: str | None = None) -> str:
 
 def read_limited(response: httpx.Response, limit: int) -> bytes:
     """Stream response bytes up to `limit` bytes."""
-    buffer = bytearray()
+    # BytesIO.getvalue() hands over its internal buffer instead of copying it,
+    # which keeps peak memory near 1x the body size.
+    buffer = io.BytesIO()
+    size = 0
     for chunk in response.iter_bytes(chunk_size=65536):
-        if len(buffer) + len(chunk) > limit:
+        size += len(chunk)
+        if size > limit:
             limit_mib = limit / (1024 * 1024)
             raise ValueError(f"Response body exceeds the {limit_mib:.0f} MiB limit.")
-        buffer.extend(chunk)
-    return bytes(buffer)
+        buffer.write(chunk)
+    return buffer.getvalue()
+
+
+def discard_body(response: httpx.Response) -> None:
+    """Drain a small unused body; closing an unread response drops the keep-alive connection."""
+    size = 0
+    try:
+        for chunk in response.iter_bytes(chunk_size=65536):
+            size += len(chunk)
+            if size > MAX_DISCARD_BYTES:
+                break
+    except httpx.HTTPError:
+        pass
+
+
+def etag_core(etag: str | None) -> str:
+    """Strip the weak prefix and quotes so ETags from PROPFIND and GET compare equal."""
+    value = (etag or "").strip()
+    if value[:2].upper() == "W/":
+        value = value[2:]
+    return value.strip().strip('"')
+
+
+def _error_detail(response: httpx.Response) -> str:
+    """Extract a short human-readable message from an error response body."""
+    raw = bytearray()
+    try:
+        for chunk in response.iter_bytes(chunk_size=MAX_ERROR_BODY_BYTES):
+            raw.extend(chunk)
+            if len(raw) >= MAX_ERROR_BODY_BYTES:
+                break
+    except httpx.HTTPError:
+        pass
+    body = bytes(raw[:MAX_ERROR_BODY_BYTES]).decode("utf-8", errors="replace").strip()
+    if not body:
+        return ""
+
+    text = ""
+    if body.startswith("<"):
+        try:
+            text = " ".join(ElementTree.fromstring(body, forbid_dtd=True).itertext())
+        except Exception:
+            text = re.sub(r"<[^>]+>", " ", body)
+    else:
+        text = body
+    text = " ".join(text.split())
+    if not text or text.lower() == (response.reason_phrase or "").lower():
+        return ""
+    return text[:300]
+
+
+class WebDAVConnectionError(ValueError):
+    """The server could not be reached (DNS, TCP, TLS, or timeout failure)."""
+
+
+def parse_dav_header(value: str | None) -> tuple[list[str], list[str]]:
+    """Split a DAV response header into compliance classes and extension tokens."""
+    classes: list[str] = []
+    extensions: list[str] = []
+    for token in (value or "").split(","):
+        token = token.strip().strip("<>").strip()
+        if not token:
+            continue
+        target = classes if token.isdigit() else extensions
+        if token not in target:
+            target.append(token)
+    return classes, extensions
+
+
+def parse_server_header(value: str | None) -> tuple[str, str]:
+    """Return (product, version) from the first 'name/version' token of a Server header."""
+    tokens = (value or "").split()
+    if not tokens:
+        return "", ""
+    product, _, version = tokens[0].partition("/")
+    return product, version
+
+
+PropName = tuple[str, str]  # (namespace, local name)
+
+
+def resolve_prop_name(key: Any, namespace: str, *, allow_dav: bool) -> PropName:
+    """Turn a plain name (uses `namespace`) or Clark '{ns}name' into (ns, name)."""
+    text = str(key).strip()
+    match = _CLARK_RE.match(text)
+    ns, name = (match.group(1).strip(), match.group(2).strip()) if match else (namespace, text)
+    if not ns:
+        raise ValueError(f"Property '{text}' has an empty namespace.")
+    if ns == "DAV:" and not allow_dav:
+        raise ValueError(
+            f"Property '{name}' is in the server-managed 'DAV:' namespace and cannot be changed."
+        )
+    if not _PROP_NAME_RE.match(name):
+        raise ValueError(
+            f"Invalid property name '{name}'. Use letters, digits, '_', '-' or '.', "
+            "starting with a letter or '_'."
+        )
+    return ns, name
+
+
+def prop_key(prop: PropName, namespace: str) -> str:
+    """Output key: plain name inside the default namespace, Clark notation otherwise."""
+    ns, name = prop
+    return name if ns == namespace else f"{{{ns}}}{name}"
+
+
+def parse_prop_values(raw: Any, namespace: str) -> dict[PropName, str]:
+    """Parse a JSON object (or dict) of property name -> scalar value."""
+    if raw is None or (isinstance(raw, str) and not raw.strip()):
+        return {}
+    error = 'Parameter \'properties\' must be a JSON object such as {"category": "report"}.'
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise ValueError(error) from exc
+    if not isinstance(raw, dict):
+        raise ValueError(error)
+
+    values: dict[PropName, str] = {}
+    for key, value in raw.items():
+        if value is None or isinstance(value, (dict, list)):
+            raise ValueError(f"Value of property '{key}' must be a string, number, or boolean.")
+        text = ("true" if value else "false") if isinstance(value, bool) else str(value)
+        if len(text) > MAX_PROP_VALUE_CHARS:
+            raise ValueError(
+                f"Value of property '{key}' exceeds {MAX_PROP_VALUE_CHARS} characters."
+            )
+        if _XML_INVALID_CHARS.search(text):
+            raise ValueError(f"Value of property '{key}' contains characters not allowed in XML.")
+        values[resolve_prop_name(key, namespace, allow_dav=False)] = text
+    return values
+
+
+def parse_prop_names(raw: Any, namespace: str, *, allow_dav: bool) -> list[PropName]:
+    """Parse a JSON array or comma/newline separated list of property names."""
+    if raw is None or (isinstance(raw, str) and not raw.strip()):
+        return []
+    if isinstance(raw, str):
+        text = raw.strip()
+        if text.startswith("["):
+            try:
+                items = json.loads(text)
+            except json.JSONDecodeError as exc:
+                raise ValueError("Property name list is not a valid JSON array.") from exc
+        else:
+            items = re.split(r"[,\n]", text)
+    elif isinstance(raw, list):
+        items = raw
+    else:
+        raise ValueError("Property names must be a JSON array or a comma-separated list.")
+
+    names: list[PropName] = []
+    for item in items:
+        if not str(item).strip():
+            continue
+        prop = resolve_prop_name(item, namespace, allow_dav=allow_dav)
+        if prop not in names:
+            names.append(prop)
+    return names
+
+
+def _prop_tag(prop: PropName) -> str:
+    return f"{{{prop[0]}}}{prop[1]}"
+
+
+def _prop_value(elem: Any) -> str:
+    """Text of a property element, or its inner XML for structured values."""
+    if len(elem) == 0:
+        return elem.text or ""
+    return (elem.text or "") + "".join(
+        XmlBuilder.tostring(child, encoding="unicode") for child in elem
+    )
+
+
+def _build_propfind(names: list[PropName]) -> bytes:
+    root = XmlBuilder.Element("{DAV:}propfind")
+    prop = XmlBuilder.SubElement(root, "{DAV:}prop")
+    for name in names:
+        XmlBuilder.SubElement(prop, _prop_tag(name))
+    return XmlBuilder.tostring(root, encoding="utf-8", xml_declaration=True)
+
+
+def _build_propertyupdate(to_set: dict[PropName, str], to_remove: list[PropName]) -> bytes:
+    root = XmlBuilder.Element("{DAV:}propertyupdate")
+    if to_set:
+        prop = XmlBuilder.SubElement(XmlBuilder.SubElement(root, "{DAV:}set"), "{DAV:}prop")
+        for name, value in to_set.items():
+            XmlBuilder.SubElement(prop, _prop_tag(name)).text = value
+    if to_remove:
+        prop = XmlBuilder.SubElement(XmlBuilder.SubElement(root, "{DAV:}remove"), "{DAV:}prop")
+        for name in to_remove:
+            XmlBuilder.SubElement(prop, _prop_tag(name))
+    return XmlBuilder.tostring(root, encoding="utf-8", xml_declaration=True)
 
 
 def emit_result(tool: Any, payload: dict[str, Any], summary: str):
@@ -352,7 +595,23 @@ class WebDAV:
             name="timeout",
         )
         self.timeout = httpx.Timeout(float(timeout_sec), connect=min(float(timeout_sec), 15.0))
+        max_file_mb = as_int(
+            credentials.get("max_file_size_mb"),
+            default=DEFAULT_MAX_FILE_MB,
+            minimum=1,
+            maximum=MAX_FILE_MB_LIMIT,
+            name="max_file_size_mb",
+        )
+        self.max_file_bytes = max_file_mb * MIB
+        self.read_only = as_bool(credentials.get("read_only"), default=False)
         self._client: httpx.Client | None = None
+
+    def _require_writable(self, operation: str) -> None:
+        if self.read_only:
+            raise ValueError(
+                f"{operation} is disabled because WebDAV Tools is configured in read-only "
+                "mode. Turn off Read-Only Mode in the provider credentials to allow changes."
+            )
 
     def __enter__(self) -> WebDAV:
         self._ensure_client()
@@ -422,6 +681,8 @@ class WebDAV:
         limit: int = 0,
     ) -> tuple[bytes, httpx.Headers, int, str]:
         """Execute a WebDAV HTTP request with safe same-origin redirect handling."""
+        if method not in READ_ONLY_METHODS:
+            self._require_writable(f"HTTP {method}")
         client = self._ensure_client()
         target_url = url
 
@@ -444,16 +705,22 @@ class WebDAV:
                             response.status_code,
                             "Check the server WebDAV configuration and logs.",
                         )
+                        detail = _error_detail(response)
+                        server_note = f" Server message: {detail}" if detail else ""
                         raise ValueError(
-                            f"{method} failed with HTTP {response.status_code}. {hint}"
+                            f"{method} failed with HTTP {response.status_code}. {hint}{server_note}"
                         )
 
-                    data = read_limited(response, limit) if limit > 0 else b""
+                    if limit > 0:
+                        data = read_limited(response, limit)
+                    else:
+                        discard_body(response)
+                        data = b""
                     return data, response.headers, response.status_code, target_url
 
             raise ValueError(f"{method} exceeded maximum redirects ({MAX_REDIRECTS}).")
         except httpx.RequestError as exc:
-            raise ValueError(
+            raise WebDAVConnectionError(
                 f"WebDAV connection error ({type(exc).__name__}): {exc}. "
                 "Verify network reachability, base URL, and TLS certificate settings."
             ) from None
@@ -537,8 +804,130 @@ class WebDAV:
                             f"{method} reported HTTP {code}{target}. {hint}".strip()
                         )
 
-    def stat(self, path: str = "") -> dict[str, Any]:
-        """Inspect a file or directory without raising an error when not found."""
+    def server_status(self) -> dict[str, Any]:
+        """Probe the root with OPTIONS + PROPFIND; report health instead of raising."""
+        result: dict[str, Any] = {
+            "status": "unreachable",
+            "reachable": False,
+            "authenticated": False,
+            "message": "",
+            "base_url": self.root,
+            "effective_url": self.root,
+            "http_status": 0,
+            "response_time_ms": 0.0,
+            "options_ms": 0.0,
+            "propfind_ms": 0.0,
+            "server": "",
+            "server_product": "",
+            "server_version": "",
+            "dav_classes": [],
+            "dav_extensions": [],
+            "allowed_methods": [],
+            "supports_locking": False,
+            "quota_available_bytes": -1,
+            "quota_used_bytes": -1,
+            "tls": self.root.startswith("https://"),
+            "verify_ssl": self.verify_ssl,
+            "read_only": self.read_only,
+            "max_file_size_mb": self.max_file_bytes // MIB,
+            "checked_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        }
+
+        def record_server(headers: httpx.Headers) -> None:
+            server = (headers.get("server") or "").strip()
+            if server and not result["server"]:
+                result["server"] = server
+                result["server_product"], result["server_version"] = parse_server_header(server)
+
+        try:
+            # OPTIONS also pays for connection setup (TCP/TLS), PROPFIND reuses it.
+            started = time.perf_counter()
+            _, opt_headers, _, _ = self.request("OPTIONS", self.root, statuses=ANY_STATUS)
+            result["options_ms"] = round((time.perf_counter() - started) * 1000, 1)
+            result["reachable"] = True
+            record_server(opt_headers)
+            classes, extensions = parse_dav_header(opt_headers.get("dav"))
+            allowed = [
+                m.strip().upper() for m in (opt_headers.get("allow") or "").split(",") if m.strip()
+            ]
+            result.update(dav_classes=classes, dav_extensions=extensions, allowed_methods=allowed)
+            result["supports_locking"] = "2" in classes or "LOCK" in allowed
+
+            started = time.perf_counter()
+            data, pf_headers, pf_status, effective_url = self.request(
+                "PROPFIND",
+                self.root,
+                statuses=ANY_STATUS,
+                headers={"Depth": "0", "Content-Type": "application/xml; charset=utf-8"},
+                content=STATUS_PROPFIND_BODY,
+                limit=MAX_XML_BYTES,
+            )
+            result["propfind_ms"] = round((time.perf_counter() - started) * 1000, 1)
+        except WebDAVConnectionError as exc:
+            result["message"] = str(exc)
+            return self._finish_status(result)
+        except ValueError as exc:
+            result.update(status="error", reachable=True, message=str(exc))
+            return self._finish_status(result)
+
+        record_server(pf_headers)
+        result["http_status"] = pf_status
+        result["effective_url"] = effective_url
+
+        if pf_status in (401, 403, 404):
+            result["status"] = {401: "unauthorized", 403: "forbidden", 404: "not_found"}[pf_status]
+            result["message"] = f"PROPFIND returned HTTP {pf_status}. {STATUS_HINTS[pf_status]}"
+        elif pf_status in (405, 501):
+            result["status"] = "not_webdav"
+            result["message"] = (
+                f"PROPFIND returned HTTP {pf_status}; the URL does not appear to be a "
+                "WebDAV endpoint."
+            )
+        elif pf_status != 207:
+            result["status"] = "error"
+            hint = STATUS_HINTS.get(pf_status, "Check the server WebDAV configuration and logs.")
+            result["message"] = f"PROPFIND returned HTTP {pf_status}. {hint}"
+        else:
+            self._apply_root_props(result, data)
+        return self._finish_status(result)
+
+    def _apply_root_props(self, result: dict[str, Any], data: bytes) -> None:
+        try:
+            root = self._parse_multistatus(data)
+        except ValueError as exc:
+            result.update(status="not_webdav", message=str(exc))
+            return
+        response = root.find(DAV_NS + "response")
+        props = self._extract_props(response) if response is not None else {}
+        resource = props.get(DAV_NS + "resourcetype")
+        if resource is None or resource.find(DAV_NS + "collection") is None:
+            result.update(
+                status="error",
+                authenticated=True,
+                message="The configured WebDAV root URL is not a directory (collection).",
+            )
+            return
+
+        for key, prop in (
+            ("quota_available_bytes", "quota-available-bytes"),
+            ("quota_used_bytes", "quota-used-bytes"),
+        ):
+            node = props.get(DAV_NS + prop)
+            text = (node.text or "").strip() if node is not None else ""
+            if text.isdigit():
+                result[key] = int(text)
+        result.update(status="ok", authenticated=True, message="WebDAV server is healthy.")
+
+    @staticmethod
+    def _finish_status(result: dict[str, Any]) -> dict[str, Any]:
+        result["response_time_ms"] = round(result["options_ms"] + result["propfind_ms"], 1)
+        return result
+
+    def stat(self, path: str = "", *, resolve_etag: bool = False) -> dict[str, Any]:
+        """Inspect a file or directory without raising an error when not found.
+
+        With resolve_etag, a file whose PROPFIND lacks getetag gets its ETag via HEAD.
+        """
         rel_path = normalize_rel_path(path, allow_empty=True)
         url = self.item_url(rel_path) if rel_path else self.root
         name = rel_path.rsplit("/", 1)[-1] if rel_path else "/"
@@ -546,7 +935,7 @@ class WebDAV:
         data, _, status_code, _ = self.request(
             "PROPFIND",
             url,
-            statuses={207, 404, 410},
+            statuses={207, 400, 404, 410},
             headers={
                 "Depth": "0",
                 "Content-Type": "application/xml; charset=utf-8",
@@ -554,6 +943,13 @@ class WebDAV:
             content=PROPFIND_BODY,
             limit=MAX_XML_BYTES,
         )
+
+        if status_code == 400:
+            # Apache mod_dav answers 400 for a path below a file; that path cannot exist.
+            parent = rel_path.rpartition("/")[0]
+            if not parent or self.stat(parent)["type"] == "directory":
+                raise ValueError(f"PROPFIND failed with HTTP 400. {STATUS_HINTS[400]}")
+            status_code = 404
 
         if status_code in (404, 410):
             return {
@@ -572,17 +968,26 @@ class WebDAV:
             props = self._extract_props(item)
             entry = self._build_entry(rel_path, name, props)
             if entry is not None:
+                if resolve_etag and entry["type"] == "file" and not entry["etag"]:
+                    entry["etag"] = self._head_etag(rel_path)
                 return {"exists": True, **entry}
 
         raise ValueError(f"Server did not return WebDAV properties for '{rel_path or '/'}'.")
 
+    def _head_etag(self, rel_path: str) -> str:
+        """ETag from a HEAD response; nginx's dav-ext module omits getetag in PROPFIND."""
+        _, headers, status_code, _ = self.request(
+            "HEAD", self.item_url(rel_path), statuses=ANY_STATUS
+        )
+        return (headers.get("etag") or "").strip() if status_code == 200 else ""
+
     def _list_single_dir(self, rel_path: str) -> list[dict[str, Any]]:
         """List immediate children of a single directory via Depth: 1 PROPFIND."""
         url = self.dir_url(rel_path)
-        data, _, _, effective_url = self.request(
+        data, _, status_code, effective_url = self.request(
             "PROPFIND",
             url,
-            statuses={207},
+            statuses={207, 400},
             headers={
                 "Depth": "1",
                 "Content-Type": "application/xml; charset=utf-8",
@@ -590,6 +995,14 @@ class WebDAV:
             content=PROPFIND_BODY,
             limit=MAX_XML_BYTES,
         )
+        if status_code == 400:
+            # Apache mod_dav rejects a collection URL (trailing slash) that names a file.
+            info = self.stat(rel_path)
+            if info["exists"] and info["type"] == "file":
+                raise ValueError(f"Path '{rel_path}' is a file, not a directory.")
+            if not info["exists"]:
+                raise ValueError(f"Directory '{rel_path or '/'}' does not exist.")
+            raise ValueError(f"PROPFIND failed with HTTP 400. {STATUS_HINTS[400]}")
 
         root = self._parse_multistatus(data)
         req_path = unquote(urlsplit(effective_url).path).rstrip("/")
@@ -691,17 +1104,21 @@ class WebDAV:
 
         glob_pat = (pattern or "").strip().lower()
         results: list[dict[str, Any]] = []
-        truncated = False
+        truncated_reason = ""
 
         queue: deque[tuple[str, int]] = deque([(rel_path, 1)])
         visited: set[str] = {rel_path}
         scanned_dirs = 0
+        deadline = time.monotonic() + LIST_TIME_BUDGET_SEC
 
         while queue:
             current_dir, current_depth = queue.popleft()
             scanned_dirs += 1
             if scanned_dirs > MAX_SCAN_DIRS:
-                truncated = True
+                truncated_reason = "max_scan_dirs"
+                break
+            if scanned_dirs > 1 and time.monotonic() > deadline:
+                truncated_reason = "time_budget"
                 break
 
             children = self._list_single_dir(current_dir)
@@ -724,7 +1141,7 @@ class WebDAV:
                     continue
 
                 if len(results) >= limit:
-                    truncated = True
+                    truncated_reason = "limit"
                     queue.clear()
                     break
                 results.append(child)
@@ -733,11 +1150,13 @@ class WebDAV:
             "path": rel_path,
             "entries": results,
             "count": len(results),
-            "truncated": truncated,
+            "truncated": bool(truncated_reason),
+            "truncated_reason": truncated_reason,
         }
 
     def create_directory(self, path: str, *, parents: bool = True) -> dict[str, Any]:
         """Create a WebDAV directory via MKCOL, optionally creating parent folders."""
+        self._require_writable("Creating directories")
         rel_path = normalize_rel_path(path, allow_empty=False)
         existing = self.stat(rel_path)
         if existing["exists"]:
@@ -747,12 +1166,23 @@ class WebDAV:
                 )
             return {"path": rel_path, "created": False, "already_exists": True}
 
-        allowed = {201, 409} if parents else {201}
+        # RFC 4918 mandates 409 for a missing parent, but some servers answer 403/404,
+        # and Apache mod_dav answers 400 when an ancestor is a file.
+        allowed = {201, 405, 400, 403, 404, 409} if (parents and "/" in rel_path) else {201, 405}
         _, _, status_code, _ = self.request("MKCOL", self.dir_url(rel_path), statuses=allowed)
         if status_code == 201:
             return {"path": rel_path, "created": True, "already_exists": False}
+        if status_code == 405:
+            recheck = self.stat(rel_path)
+            if recheck["exists"] and recheck["type"] == "directory":
+                return {"path": rel_path, "created": False, "already_exists": True}
+            # Some servers (e.g. rclone) also answer 405 when an ancestor is a file;
+            # with parents=True the walk below reports which segment is blocking.
+            if not parents or "/" not in rel_path:
+                raise ValueError(
+                    f"Failed to create directory '{rel_path}' (HTTP 405). {STATUS_HINTS[405]}"
+                )
 
-        # Parent folder missing (HTTP 409) and parents=True: create hierarchy top-down.
         segments = rel_path.split("/")
         current = ""
         for segment in segments:
@@ -765,12 +1195,36 @@ class WebDAV:
                     )
                 continue
             _, _, code, _ = self.request("MKCOL", self.dir_url(current), statuses={201, 405})
-            if code == 405:
-                recheck = self.stat(current)
-                if not (recheck["exists"] and recheck["type"] == "directory"):
-                    raise ValueError(f"Failed to create directory '{current}' (HTTP 405).")
+            self._confirm_mkcol(current, code)
 
         return {"path": rel_path, "created": True, "already_exists": False}
+
+    def _confirm_mkcol(self, rel_path: str, status_code: int) -> None:
+        """Treat MKCOL 405 as success only if a directory now exists (concurrent creation)."""
+        if status_code != 405:
+            return
+        recheck = self.stat(rel_path)
+        if not (recheck["exists"] and recheck["type"] == "directory"):
+            raise ValueError(
+                f"Failed to create directory '{rel_path}' (HTTP 405). "
+                f"{STATUS_HINTS[405]}"
+            )
+
+    def _prepare_parent(self, rel_path: str, target: dict[str, Any], create_parents: bool) -> bool:
+        """Create missing parents, or verify they exist when creation is disabled."""
+        if target["exists"]:
+            return False
+        if create_parents:
+            return self._ensure_parent_dir(rel_path)
+        # nginx creates missing parents on PUT/MOVE/COPY regardless, so check here.
+        parent = rel_path.rpartition("/")[0]
+        if parent:
+            info = self.stat(parent)
+            if not (info["exists"] and info["type"] == "directory"):
+                raise ValueError(
+                    f"Parent directory '{parent}' does not exist and create_parents is disabled."
+                )
+        return False
 
     def _ensure_parent_dir(self, rel_path: str) -> bool:
         if "/" not in rel_path:
@@ -779,25 +1233,33 @@ class WebDAV:
         res = self.create_directory(parent_dir, parents=True)
         return bool(res["created"])
 
+    def _check_size(self, size: int) -> None:
+        if size > self.max_file_bytes:
+            raise ValueError(
+                f"File size ({size} bytes) exceeds the {self.max_file_bytes // MIB} MiB "
+                "single-file limit set in the provider's Max File Size setting."
+            )
+
     def download(
         self,
         path: str,
         *,
         _existing: dict[str, Any] | None = None,
     ) -> tuple[bytes, dict[str, Any]]:
-        """Download a WebDAV file up to MAX_FILE_BYTES and return bytes + metadata."""
+        """Download a WebDAV file up to max_file_bytes and return bytes + metadata."""
         rel_path = normalize_rel_path(path, allow_empty=False)
         info = _existing if _existing is not None else self.stat(rel_path)
         if not info["exists"]:
             raise ValueError(f"File '{rel_path}' does not exist.")
         if info["type"] == "directory":
             raise ValueError(f"Path '{rel_path}' is a directory, not a file.")
+        self._check_size(info["size"])
 
         data, headers, _, _ = self.request(
             "GET",
             self.item_url(rel_path),
             statuses={200},
-            limit=MAX_FILE_BYTES,
+            limit=self.max_file_bytes,
         )
         filename = rel_path.rsplit("/", 1)[-1]
         mime_type = guess_mime_type(filename, headers.get("content-type") or info["content_type"])
@@ -825,38 +1287,45 @@ class WebDAV:
         if_match_etag: str = "",
         _existing: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        if len(data) > MAX_FILE_BYTES:
-            limit_mib = MAX_FILE_BYTES // (1024 * 1024)
-            raise ValueError(f"File size exceeds the {limit_mib} MiB single-file limit.")
+        self._check_size(len(data))
 
         existing = _existing if _existing is not None else self.stat(rel_path)
         if existing["exists"] and existing["type"] == "directory":
             raise ValueError(f"Target path '{rel_path}' is an existing directory, not a file.")
 
+        # Some servers (e.g. rclone) ignore If-Match / If-None-Match on PUT, so the
+        # preconditions are also checked client-side.
         expected_etag = if_match_etag.strip()
         if expected_etag:
             if not existing["exists"]:
                 raise ValueError(
                     f"Precondition failed: target '{rel_path}' does not exist for If-Match."
                 )
-            if existing["etag"] and existing["etag"] != expected_etag:
+            remote_etag = existing["etag"] or self._head_etag(rel_path)
+            if not remote_etag:
                 raise ValueError(
-                    f"ETag mismatch for '{rel_path}': remote ETag is {existing['etag']}."
+                    f"Cannot check If-Match for '{rel_path}': the server does not report an "
+                    "ETag for this file."
+                )
+            if etag_core(remote_etag) != etag_core(expected_etag):
+                raise ValueError(
+                    f"ETag mismatch for '{rel_path}': remote ETag is {remote_etag} "
+                    "(the file was modified since it was read)."
                 )
         elif not overwrite and existing["exists"]:
             raise ValueError(
                 f"Target file '{rel_path}' already exists and overwrite is disabled."
             )
 
-        created_parents = (
-            self._ensure_parent_dir(rel_path)
-            if (create_parents and not existing["exists"])
-            else False
-        )
+        created_parents = self._prepare_parent(rel_path, existing, create_parents)
 
         headers = {"Content-Type": content_type}
         if expected_etag:
-            headers["If-Match"] = expected_etag
+            # If-Match uses strong comparison, so a weak ETag always fails with 412. The
+            # current remote ETag already matched above; once it is strong (Apache keeps
+            # ETags weak for ~1s after a write) it lets the server re-check atomically.
+            if not remote_etag.upper().startswith("W/"):
+                headers["If-Match"] = f'"{etag_core(remote_etag)}"'
         elif not overwrite:
             headers["If-None-Match"] = "*"
 
@@ -868,6 +1337,10 @@ class WebDAV:
             content=data,
         )
         etag = (resp_headers.get("etag") or "").strip()
+        if not etag:
+            # Some servers (e.g. Apache mod_dav) send no ETag on PUT; the result's ETag
+            # must still be usable for a later If-Match.
+            etag = self.stat(rel_path, resolve_etag=True)["etag"]
         return {
             "path": rel_path,
             "size": len(data),
@@ -877,12 +1350,10 @@ class WebDAV:
         }
 
     def _read_dify_file(self, file: Any) -> bytes:
-        """Stream a Dify File object into memory while enforcing MAX_FILE_BYTES."""
+        """Stream a Dify File object into memory while enforcing max_file_bytes."""
         preloaded = getattr(file, "_blob", None)
         if isinstance(preloaded, (bytes, bytearray)):
-            if len(preloaded) > MAX_FILE_BYTES:
-                limit_mib = MAX_FILE_BYTES // (1024 * 1024)
-                raise ValueError(f"File size exceeds the {limit_mib} MiB single-file limit.")
+            self._check_size(len(preloaded))
             return bytes(preloaded)
 
         file_url = (getattr(file, "url", None) or "").strip()
@@ -897,7 +1368,7 @@ class WebDAV:
                 follow_redirects=True,
             ) as response:
                 response.raise_for_status()
-                return read_limited(response, MAX_FILE_BYTES)
+                return read_limited(response, self.max_file_bytes)
         except httpx.UnsupportedProtocol as exc:
             raise ValueError(
                 f"Invalid Dify file URL '{file_url}': {exc}. "
@@ -916,15 +1387,13 @@ class WebDAV:
         if_match_etag: str = "",
     ) -> dict[str, Any]:
         """Upload a Dify File object to WebDAV."""
+        self._require_writable("Uploading files")
         raw_path = (path or "").strip()
         if (not raw_path or raw_path.endswith("/")) and getattr(file, "filename", None):
             raw_path = f"{raw_path.rstrip('/')}/{file.filename}".lstrip("/")
 
         rel_path = normalize_rel_path(raw_path, allow_empty=False)
-        declared_size = getattr(file, "size", None) or 0
-        if declared_size > MAX_FILE_BYTES:
-            limit_mib = MAX_FILE_BYTES // (1024 * 1024)
-            raise ValueError(f"File size exceeds the {limit_mib} MiB single-file limit.")
+        self._check_size(getattr(file, "size", None) or 0)
 
         data = self._read_dify_file(file)
         content_type = guess_mime_type(rel_path, getattr(file, "mime_type", None))
@@ -981,14 +1450,15 @@ class WebDAV:
         path: str,
         content: str,
         *,
-        mode: str = "overwrite",
+        mode: str = "create",
         encoding: str = "utf-8",
         content_type: str = "",
         create_parents: bool = True,
     ) -> dict[str, Any]:
         """Write, create, or append text content directly to a WebDAV file."""
+        self._require_writable("Writing text files")
         rel_path = normalize_rel_path(path, allow_empty=False)
-        write_mode = (mode or "overwrite").strip().lower()
+        write_mode = (mode or "create").strip().lower()
         if write_mode not in ("create", "overwrite", "append"):
             raise ValueError("Parameter 'mode' must be 'create', 'overwrite', or 'append'.")
 
@@ -1002,12 +1472,13 @@ class WebDAV:
             raise ValueError(f"Text content cannot be encoded with '{codec}': {exc}") from exc
 
         known_existing: dict[str, Any] | None = None
+        lock_etag = ""
         if write_mode == "append":
-            known_existing = self.stat(rel_path)
-            if known_existing["exists"]:
-                if known_existing["type"] == "directory":
+            snapshot = self.stat(rel_path)
+            if snapshot["exists"]:
+                if snapshot["type"] == "directory":
                     raise ValueError(f"Target path '{rel_path}' is a directory, not a file.")
-                old_bytes, _ = self.download(rel_path, _existing=known_existing)
+                old_bytes, old_meta = self.download(rel_path, _existing=snapshot)
                 try:
                     old_text = old_bytes.decode(codec)
                 except UnicodeDecodeError as exc:
@@ -1015,10 +1486,21 @@ class WebDAV:
                         f"Existing file '{rel_path}' could not be decoded using '{codec}' "
                         "for text append."
                     ) from exc
-                payload = (old_text + new_text).encode(codec)
+                # Release intermediates eagerly: holding bytes, text, joined text and
+                # payload together peaks at ~4x the file size.
+                del old_bytes
+                combined = old_text + new_text
+                del old_text
+                payload = combined.encode(codec)
+                del combined
+                # Leave known_existing unset so _put_bytes re-stats and detects
+                # concurrent writes between the read and the PUT.
+                lock_etag = snapshot["etag"] or old_meta["etag"]
+                allow_overwrite = True
             else:
                 payload = encoded_new
-            allow_overwrite = True
+                known_existing = snapshot
+                allow_overwrite = False
         else:
             payload = encoded_new
             allow_overwrite = write_mode == "overwrite"
@@ -1036,6 +1518,7 @@ class WebDAV:
             content_type=base_mime,
             overwrite=allow_overwrite,
             create_parents=create_parents,
+            if_match_etag=lock_etag,
             _existing=known_existing,
         )
         return {**res, "mode": write_mode}
@@ -1049,6 +1532,7 @@ class WebDAV:
         overwrite: bool = False,
         create_parents: bool = True,
     ) -> dict[str, Any]:
+        self._require_writable("Moving items" if method == "MOVE" else "Copying items")
         src = normalize_rel_path(source_path, allow_empty=False)
         dst = normalize_rel_path(destination_path, allow_empty=False)
         if src == dst:
@@ -1069,12 +1553,15 @@ class WebDAV:
             raise ValueError(
                 f"Destination path '{dst}' already exists and overwrite is disabled."
             )
+        if dst_info["exists"] and dst_info["type"] != src_info["type"]:
+            # Servers disagree here: rclone and WsgiDAV silently replace a whole
+            # directory with the file, Apache answers 301 and nginx 409.
+            raise ValueError(
+                f"Cannot replace existing {dst_info['type']} '{dst}' with {src_info['type']} "
+                f"'{src}'. Delete the destination first if this is intended."
+            )
 
-        created_parents = (
-            self._ensure_parent_dir(dst)
-            if (create_parents and not dst_info["exists"])
-            else False
-        )
+        created_parents = self._prepare_parent(dst, dst_info, create_parents)
 
         src_url = self.dir_url(src) if is_dir else self.item_url(src)
         dst_url = self.dir_url(dst) if is_dir else self.item_url(dst)
@@ -1140,6 +1627,7 @@ class WebDAV:
 
     def delete(self, path: str, *, missing_ok: bool = False) -> dict[str, Any]:
         """Delete a file or directory on the WebDAV server."""
+        self._require_writable("Deleting items")
         rel_path = normalize_rel_path(path, allow_empty=False)
         info = self.stat(rel_path)
         if not info["exists"]:
@@ -1162,3 +1650,186 @@ class WebDAV:
             "deleted": True,
             "type": info["type"],
         }
+
+    def _prop_target(self, path: str) -> tuple[str, str, dict[str, Any]]:
+        rel_path = normalize_rel_path(path, allow_empty=True)
+        info = self.stat(rel_path)
+        if not info["exists"]:
+            raise ValueError(f"Path '{rel_path or '/'}' does not exist.")
+        url = self.dir_url(rel_path) if info["type"] == "directory" else self.item_url(rel_path)
+        return rel_path, url, info
+
+    def _propfind_response(self, url: str, body: bytes) -> ElementTree.Element:
+        data, _, _, _ = self.request(
+            "PROPFIND",
+            url,
+            statuses={207},
+            headers={"Depth": "0", "Content-Type": "application/xml; charset=utf-8"},
+            content=body,
+            limit=MAX_XML_BYTES,
+        )
+        response = self._parse_multistatus(data).find(DAV_NS + "response")
+        if response is None:
+            raise ValueError("Server returned no WebDAV properties.")
+        return response
+
+    def get_properties(
+        self,
+        path: str = "",
+        names: Any = None,
+        *,
+        namespace: str = DEFAULT_PROP_NS,
+    ) -> dict[str, Any]:
+        """Read selected properties, or every non-DAV: property when no names are given."""
+        namespace = (namespace or DEFAULT_PROP_NS).strip()
+        requested = parse_prop_names(names, namespace, allow_dav=True)
+        if len(requested) > MAX_PROPS_PER_CALL:
+            raise ValueError(f"At most {MAX_PROPS_PER_CALL} properties can be read per call.")
+        rel_path, url, info = self._prop_target(path)
+
+        truncated = False
+        if not requested:
+            # Some servers (e.g. WsgiDAV) answer propname with no properties at all,
+            # others reject it; fall back to allprop, which must include dead properties.
+            for body in (PROPNAME_BODY, ALLPROP_BODY):
+                try:
+                    response = self._propfind_response(url, body)
+                except WebDAVConnectionError:
+                    raise
+                except ValueError:
+                    if body is ALLPROP_BODY:
+                        raise
+                    continue
+                for tag in self._extract_props(response):
+                    match = _CLARK_RE.match(tag)
+                    if not match or match.group(1) == "DAV:":
+                        continue
+                    prop = (match.group(1), match.group(2))
+                    if prop not in requested:
+                        requested.append(prop)
+                if requested:
+                    break
+            truncated = len(requested) > MAX_PROPS_PER_CALL
+            requested = requested[:MAX_PROPS_PER_CALL]
+
+        entries: list[dict[str, str]] = []
+        values: dict[str, str] = {}
+        missing: list[str] = []
+        if requested:
+            props = self._extract_props(self._propfind_response(url, _build_propfind(requested)))
+            for prop in requested:
+                key = prop_key(prop, namespace)
+                elem = props.get(_prop_tag(prop))
+                if elem is None:
+                    missing.append(key)
+                    continue
+                value = _prop_value(elem)
+                entries.append({"name": prop[1], "namespace": prop[0], "value": value})
+                values[key] = value
+
+        return {
+            "path": rel_path,
+            "type": info["type"],
+            "namespace": namespace,
+            "count": len(entries),
+            "properties": entries,
+            "values": values,
+            "missing": missing,
+            "truncated": truncated,
+        }
+
+    def set_properties(
+        self,
+        path: str,
+        properties: Any = None,
+        remove: Any = None,
+        *,
+        namespace: str = DEFAULT_PROP_NS,
+        verify: bool = True,
+    ) -> dict[str, Any]:
+        """Set and/or remove custom (dead) properties via PROPPATCH, then read them back."""
+        self._require_writable("Setting properties")
+        namespace = (namespace or DEFAULT_PROP_NS).strip()
+        to_set = parse_prop_values(properties, namespace)
+        to_remove = parse_prop_names(remove, namespace, allow_dav=False)
+        if not to_set and not to_remove:
+            raise ValueError("Provide at least one property to set or remove.")
+        overlap = [prop_key(p, namespace) for p in to_remove if p in to_set]
+        if overlap:
+            raise ValueError(f"Properties cannot be set and removed at once: {', '.join(overlap)}.")
+        if len(to_set) + len(to_remove) > MAX_PROPS_PER_CALL:
+            raise ValueError(f"At most {MAX_PROPS_PER_CALL} properties can be changed per call.")
+
+        rel_path, url, info = self._prop_target(path)
+        data, _, status_code, _ = self.request(
+            "PROPPATCH",
+            url,
+            statuses={200, 207, 405, 501},
+            headers={"Content-Type": "application/xml; charset=utf-8"},
+            content=_build_propertyupdate(to_set, to_remove),
+            limit=MAX_XML_BYTES,
+        )
+        if status_code in (405, 501):
+            raise ValueError(
+                f"This WebDAV server does not support custom properties (PROPPATCH returned "
+                f"HTTP {status_code}; for example, nginx's WebDAV modules have no PROPPATCH)."
+            )
+        if status_code == 207:
+            self._raise_proppatch_failures(data, namespace)
+
+        verified = False
+        if verify:
+            touched = [*to_set, *to_remove]
+            props = self._extract_props(self._propfind_response(url, _build_propfind(touched)))
+            not_persisted = [
+                prop_key(p, namespace)
+                for p, value in to_set.items()
+                if _prop_tag(p) not in props
+                or _prop_value(props[_prop_tag(p)]).strip() != value.strip()
+            ] + [prop_key(p, namespace) for p in to_remove if _prop_tag(p) in props]
+            if not_persisted:
+                raise ValueError(
+                    "The server accepted PROPPATCH but the read-back does not match for: "
+                    f"{', '.join(not_persisted)}. The server probably does not store custom "
+                    "properties (for example, rclone acknowledges PROPPATCH without saving)."
+                )
+            verified = True
+
+        return {
+            "path": rel_path,
+            "type": info["type"],
+            "namespace": namespace,
+            "set": [prop_key(p, namespace) for p in to_set],
+            "removed": [prop_key(p, namespace) for p in to_remove],
+            "verified": verified,
+            "values": {prop_key(p, namespace): v for p, v in to_set.items()},
+        }
+
+    def _raise_proppatch_failures(self, data: bytes, namespace: str) -> None:
+        """PROPPATCH is atomic: any failed property means nothing was applied."""
+        if not data.strip():
+            return
+        failures: list[str] = []
+        dependent: list[str] = []
+        for response in self._parse_multistatus(data).findall(DAV_NS + "response"):
+            for group in response.findall(DAV_NS + "propstat"):
+                parts = (group.findtext(DAV_NS + "status") or "").split()
+                code = int(parts[1]) if len(parts) >= 2 and parts[1].isdigit() else 0
+                if code < 400:
+                    continue
+                prop = group.find(DAV_NS + "prop")
+                for node in prop if prop is not None else []:
+                    match = _CLARK_RE.match(node.tag)
+                    key = prop_key((match.group(1), match.group(2)), namespace) if match else node.tag
+                    (dependent if code == 424 else failures).append(f"{key} (HTTP {code})")
+        if failures or dependent:
+            hint = (
+                " HTTP 403 usually means the property is protected or custom properties "
+                "are not supported."
+                if any("HTTP 403" in item for item in failures)
+                else ""
+            )
+            raise ValueError(
+                "PROPPATCH was rejected and no properties were changed: "
+                f"{', '.join(failures or dependent)}.{hint}"
+            )

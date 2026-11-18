@@ -11,7 +11,7 @@ class StatItem(Tool):
     def _invoke(self, tool_parameters: dict):
         path = tool_parameters.get("path") or ""
         with WebDAV(self.runtime.credentials) as client:
-            result = client.stat(path)
+            result = client.stat(path, resolve_etag=True)
 
         target_label = f"'{result['path']}'" if result["path"] else "'/'"
         if result["exists"]:

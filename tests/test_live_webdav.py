@@ -1,4 +1,4 @@
-"""Live integration tests for all 10 Dify tools against a real WebDAV server.
+"""Live integration tests for all 13 Dify tools against a real WebDAV server.
 
 Skipped unless WEBDAV_BASE_URL, WEBDAV_USERNAME and WEBDAV_PASSWORD are set.
 Each test invokes one tool class the same way Dify does. Writes stay inside one
@@ -7,6 +7,7 @@ disposable directory, which is deleted afterwards.
 
 from __future__ import annotations
 
+import json
 import os
 import unittest
 import uuid
@@ -14,12 +15,14 @@ import uuid
 from dify_plugin.config.config import DifyPluginEnv
 from dify_plugin.core.plugin_registration import PluginRegistration
 from dify_plugin.entities.invoke_message import InvokeMessage
+from dify_plugin.errors.tool import ToolProviderCredentialValidationError
 from dify_plugin.file.entities import FileType
 from dify_plugin.file.file import File
 
 from dav_client import WebDAV
 
 TOOL_NAMES = (
+    "server_status",
     "list_files",
     "stat_item",
     "download_file",
@@ -30,6 +33,14 @@ TOOL_NAMES = (
     "move_item",
     "copy_item",
     "delete_item",
+    "get_properties",
+    "set_properties",
+)
+
+LOCK_BODY = (
+    b'<?xml version="1.0" encoding="utf-8"?><lockinfo xmlns="DAV:">'
+    b"<lockscope><exclusive/></lockscope><locktype><write/></locktype>"
+    b"<owner>dify-webdav-tools-itest</owner></lockinfo>"
 )
 
 
@@ -57,7 +68,7 @@ class LiveWebDAVToolTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         registration = PluginRegistration(DifyPluginEnv(INSTALL_METHOD="local"))
-        _, _, cls.tools_map = registration.tools_mapping["webdav_tools"]
+        _, cls.provider_cls, cls.tools_map = registration.tools_mapping["webdav_tools"]
         cls.credentials = _credentials()
         missing = [name for name in TOOL_NAMES if name not in cls.tools_map]
         if missing:
@@ -352,3 +363,427 @@ class LiveWebDAVToolTests(unittest.TestCase):
 
         with self.assertRaises(ValueError):
             self._invoke("delete_item", {"path": ""})
+
+    def _invoke_with(self, name: str, params: dict, **overrides: str):
+        _, tool_cls = self.tools_map[name]
+        tool = tool_cls.from_credentials({**self.credentials, **overrides})
+        return list(tool.invoke(params))
+
+    def test_custom_properties(self) -> None:
+        path = f"{self.folder}/props/report.md"
+        self._invoke("write_text_file", {"path": path, "content": "# report"})
+        props = {
+            "category": "report",
+            "reviewer": "\u5f20\u4e09 <ops@example.com> & co",
+            "{http://example.com/ns}score": 42,
+        }
+        params = {"path": path, "properties": json.dumps(props)}
+
+        if os.environ.get("WEBDAV_DEAD_PROPS", "1") == "0":
+            # rclone fakes success (caught by read-back); nginx rejects PROPPATCH outright.
+            with self.assertRaisesRegex(ValueError, "read-back does not match|does not support custom"):
+                self._invoke("set_properties", params)
+            return
+
+        _, written = self._invoke("set_properties", params)
+        self.assertTrue(written["verified"])
+
+        _, listed = self._invoke("get_properties", {"path": path})
+        self.assertEqual(listed["values"]["category"], "report")
+        self.assertEqual(listed["values"]["reviewer"], props["reviewer"])
+        self.assertEqual(listed["values"]["{http://example.com/ns}score"], "42")
+
+        _, named = self._invoke(
+            "get_properties", {"path": path, "names": "category, absent, {DAV:}getcontentlength"}
+        )
+        self.assertEqual(named["missing"], ["absent"])
+        self.assertEqual(named["values"]["{DAV:}getcontentlength"], "8")
+
+        _, removed = self._invoke("set_properties", {"path": path, "remove": "reviewer"})
+        self.assertTrue(removed["verified"])
+        _, after = self._invoke("get_properties", {"path": path, "names": "category, reviewer"})
+        self.assertEqual(after["missing"], ["reviewer"])
+
+        folder = f"{self.folder}/props"
+        _, on_dir = self._invoke(
+            "set_properties", {"path": folder, "properties": '{"owner": "team-a"}'}
+        )
+        self.assertEqual(on_dir["type"], "directory")
+        _, dir_props = self._invoke("get_properties", {"path": folder, "names": "owner"})
+        self.assertEqual(dir_props["values"], {"owner": "team-a"})
+
+    def test_server_status(self) -> None:
+        _, out = self._invoke("server_status", {})
+        self.assertEqual(out["status"], "ok", out["message"])
+        self.assertTrue(out["reachable"])
+        self.assertTrue(out["authenticated"])
+        self.assertEqual(out["http_status"], 207)
+        # nginx advertises only "DAV: 2" although class 2 implies class 1.
+        self.assertTrue({"1", "2"} & set(out["dav_classes"]))
+        self.assertTrue(out["server_product"])
+        self.assertGreater(out["response_time_ms"], 0)
+
+        messages = self._invoke_with("server_status", {}, password=self.credentials["password"] + "-x")
+        status = next(
+            m.message.variable_value
+            for m in messages
+            if m.type == InvokeMessage.MessageType.VARIABLE and m.message.variable_name == "status"
+        )
+        self.assertEqual(status, "unauthorized")
+
+        messages = self._invoke_with("server_status", {}, base_url="http://127.0.0.1:9/", timeout="5")
+        variables = {
+            m.message.variable_name: m.message.variable_value
+            for m in messages
+            if m.type == InvokeMessage.MessageType.VARIABLE
+        }
+        self.assertEqual(variables["status"], "unreachable")
+        self.assertFalse(variables["reachable"])
+
+    def test_credential_validation(self) -> None:
+        self.provider_cls().validate_credentials(self.credentials)
+        for overrides in (
+            {"password": self.credentials["password"] + "-wrong"},
+            {"auth_type": "bearer", "password": "not-a-token"},
+        ):
+            with self.assertRaisesRegex(ToolProviderCredentialValidationError, "HTTP 401"):
+                self.provider_cls().validate_credentials({**self.credentials, **overrides})
+        with self.assertRaisesRegex(ValueError, "HTTP 401"):
+            self._invoke_with(
+                "list_files", {"path": ""}, password=self.credentials["password"] + "-wrong"
+            )
+
+    def test_default_create_mode_and_read_only_switch(self) -> None:
+        path = f"{self.folder}/guarded.md"
+        self._invoke("write_text_file", {"path": path, "content": "original"})
+        with self.assertRaisesRegex(ValueError, "already exists"):
+            self._invoke("write_text_file", {"path": path, "content": "clobber"})
+
+        for name, params in (
+            ("write_text_file", {"path": path, "content": "x", "mode": "overwrite"}),
+            ("create_directory", {"path": f"{self.folder}/ro-dir"}),
+            ("delete_item", {"path": path}),
+            ("move_item", {"source_path": path, "destination_path": f"{self.folder}/ro.md"}),
+        ):
+            with self.subTest(tool=name):
+                with self.assertRaisesRegex(ValueError, "read-only mode"):
+                    self._invoke_with(name, params, read_only="true")
+
+        messages = self._invoke_with("read_text_file", {"path": path}, read_only="true")
+        text = next(m.message.text for m in messages if m.type == InvokeMessage.MessageType.TEXT)
+        self.assertEqual(text, "original")
+        _, listed = self._invoke("list_files", {"path": self.folder})
+        self.assertEqual([e["name"] for e in listed["entries"]], ["guarded.md"])
+
+    def test_special_characters_in_paths(self) -> None:
+        names = ["a b#c%d+e&f;g=h.txt", "\u4e2d\u6587 \u6587\u4ef6.md", "emoji-\U0001f600.txt"]
+        folder = f"{self.folder}/sp ace/100%/\u76ee\u5f55"
+        for name in names:
+            self._invoke(
+                "write_text_file",
+                {"path": f"{folder}/{name}", "content": name, "mode": "create"},
+            )
+        _, listed = self._invoke("list_files", {"path": folder})
+        self.assertEqual(sorted(e["name"] for e in listed["entries"]), sorted(names))
+        for name in names:
+            _, read = self._invoke("read_text_file", {"path": f"{folder}/{name}"})
+            self.assertEqual(read["content"], name)
+
+    def test_append_keeps_existing_content(self) -> None:
+        path = f"{self.folder}/logs/run.log"
+        for line in ("one\n", "two\n", "three\n"):
+            self._invoke("write_text_file", {"path": path, "content": line, "mode": "append"})
+        _, read = self._invoke("read_text_file", {"path": path})
+        self.assertEqual(read["content"], "one\ntwo\nthree\n")
+
+    def test_stale_if_match_is_rejected(self) -> None:
+        path = f"{self.folder}/doc.txt"
+        # Different lengths: some servers (e.g. WsgiDAV) derive ETags from size and
+        # mtime in whole seconds, so same-size writes within a second share an ETag.
+        _, first = self._invoke("write_text_file", {"path": path, "content": "v1", "mode": "create"})
+        self._invoke("write_text_file", {"path": path, "content": "v2", "mode": "overwrite"})
+        self._invoke("write_text_file", {"path": path, "content": "v2-final", "mode": "overwrite"})
+        source = File(
+            url="https://files.invalid/doc.txt",
+            filename="doc.txt",
+            mime_type="text/plain",
+            size=2,
+            type=FileType.DOCUMENT,
+        )
+        source._blob = b"v3"
+        with self.assertRaisesRegex(ValueError, "ETag mismatch"):
+            self._invoke("upload_file", {"path": path, "file": source, "if_match_etag": first["etag"]})
+        _, read = self._invoke("read_text_file", {"path": path})
+        self.assertEqual(read["content"], "v2-final")
+
+        _, current = self._invoke("stat_item", {"path": path})
+        self._invoke("upload_file", {"path": path, "file": source, "if_match_etag": current["etag"]})
+        _, read = self._invoke("read_text_file", {"path": path})
+        self.assertEqual(read["content"], "v3")
+
+    def test_gb18030_round_trip(self) -> None:
+        path = f"{self.folder}/gbk.txt"
+        text = "\u4f60\u597d\uff0cWebDAV\n"
+        self._invoke("write_text_file", {"path": path, "content": text, "encoding": "gb18030"})
+        _, info = self._invoke("stat_item", {"path": path})
+        self.assertEqual(info["size"], len(text.encode("gb18030")))
+        _, read = self._invoke("read_text_file", {"path": path, "encoding": "gb18030"})
+        self.assertEqual(read["content"], text)
+        with self.assertRaisesRegex(ValueError, "could not be decoded"):
+            self._invoke("read_text_file", {"path": path, "encoding": "utf-8"})
+
+    def test_create_deep_directory_and_conflict_with_file(self) -> None:
+        deep = f"{self.folder}/l1/l2/l3/l4/l5"
+        _, out = self._invoke("create_directory", {"path": deep, "parents": True})
+        self.assertTrue(out["created"])
+        _, info = self._invoke("stat_item", {"path": deep})
+        self.assertEqual(info["type"], "directory")
+
+        with self.assertRaisesRegex(ValueError, "HTTP 409"):
+            self._invoke("create_directory", {"path": f"{self.folder}/m1/m2", "parents": False})
+
+        self._invoke("write_text_file", {"path": f"{self.folder}/blocker", "content": "x"})
+        with self.assertRaisesRegex(ValueError, "'[^']*/blocker' is an existing file"):
+            self._invoke("create_directory", {"path": f"{self.folder}/blocker/sub"})
+
+    def test_directory_copy_move_and_recursive_delete(self) -> None:
+        for rel in ("src/a.txt", "src/sub/b.txt", "src/sub/deeper/c.txt"):
+            self._invoke("write_text_file", {"path": f"{self.folder}/{rel}", "content": rel})
+
+        _, copied = self._invoke(
+            "copy_item",
+            {"source_path": f"{self.folder}/src", "destination_path": f"{self.folder}/dst/copy"},
+        )
+        self.assertEqual(copied["type"], "directory")
+        _, listed = self._invoke(
+            "list_files",
+            {"path": f"{self.folder}/dst/copy", "recursive": True, "entry_type": "file"},
+        )
+        self.assertEqual(
+            sorted(e["path"] for e in listed["entries"]),
+            sorted(f"{self.folder}/dst/copy/{p}" for p in ("a.txt", "sub/b.txt", "sub/deeper/c.txt")),
+        )
+
+        with self.assertRaisesRegex(ValueError, "own subdirectory"):
+            self._invoke(
+                "move_item",
+                {"source_path": f"{self.folder}/src", "destination_path": f"{self.folder}/src/x"},
+            )
+        with self.assertRaisesRegex(ValueError, "already exists"):
+            self._invoke(
+                "move_item",
+                {"source_path": f"{self.folder}/src", "destination_path": f"{self.folder}/dst/copy"},
+            )
+
+        self._invoke(
+            "move_item",
+            {"source_path": f"{self.folder}/src", "destination_path": f"{self.folder}/moved"},
+        )
+        _, gone = self._invoke("stat_item", {"path": f"{self.folder}/src"})
+        self.assertFalse(gone["exists"])
+        _, read = self._invoke("read_text_file", {"path": f"{self.folder}/moved/sub/deeper/c.txt"})
+        self.assertEqual(read["content"], "src/sub/deeper/c.txt")
+
+        _, removed = self._invoke("delete_item", {"path": f"{self.folder}/moved"})
+        self.assertEqual(removed["type"], "directory")
+        _, gone = self._invoke("stat_item", {"path": f"{self.folder}/moved"})
+        self.assertFalse(gone["exists"])
+
+    def test_list_limit_depth_and_pattern(self) -> None:
+        for rel in ("r1.txt", "r2.txt", "r3.log", "n1/x.txt", "n1/n2/y.txt"):
+            self._invoke("write_text_file", {"path": f"{self.folder}/tree/{rel}", "content": "x"})
+        base = f"{self.folder}/tree"
+
+        _, capped = self._invoke("list_files", {"path": base, "entry_type": "file", "limit": 2})
+        self.assertEqual(capped["count"], 2)
+        self.assertTrue(capped["truncated"])
+        self.assertEqual(capped["truncated_reason"], "limit")
+
+        _, shallow = self._invoke(
+            "list_files",
+            {"path": base, "recursive": True, "max_depth": 2, "pattern": "*.txt", "entry_type": "file"},
+        )
+        self.assertEqual(
+            sorted(e["name"] for e in shallow["entries"]), ["r1.txt", "r2.txt", "x.txt"]
+        )
+
+        with self.assertRaisesRegex(ValueError, "is a file"):
+            self._invoke("list_files", {"path": f"{base}/r1.txt"})
+
+    def test_large_binary_round_trip_and_size_limit(self) -> None:
+        payload = os.urandom(20 * 1024 * 1024)
+        source = File(
+            url="https://files.invalid/big.bin",
+            filename="big.bin",
+            mime_type="application/octet-stream",
+            size=len(payload),
+            type=FileType.CUSTOM,
+        )
+        source._blob = payload
+        _, uploaded = self._invoke("upload_file", {"path": f"{self.folder}/big/", "file": source})
+        self.assertEqual(uploaded["size"], len(payload))
+
+        messages, downloaded = self._invoke("download_file", {"path": uploaded["path"]})
+        blob = next(m for m in messages if m.type == InvokeMessage.MessageType.BLOB)
+        self.assertEqual(blob.message.blob, payload)
+        self.assertEqual(downloaded["mime_type"], "application/octet-stream")
+
+        with self.assertRaisesRegex(ValueError, "exceeds the 10 MiB"):
+            self._invoke_with("download_file", {"path": uploaded["path"]}, max_file_size_mb="10")
+        with self.assertRaisesRegex(ValueError, "exceeds the 10 MiB"):
+            self._invoke_with(
+                "upload_file",
+                {"path": f"{self.folder}/big/again.bin", "file": source},
+                max_file_size_mb="10",
+            )
+        _, absent = self._invoke("stat_item", {"path": f"{self.folder}/big/again.bin"})
+        self.assertFalse(absent["exists"])
+
+    def _read(self, path: str) -> str:
+        return self._invoke("read_text_file", {"path": path})[1]["content"]
+
+    def test_overwrite_semantics_for_copy_and_move(self) -> None:
+        base = self.folder
+        self._invoke("write_text_file", {"path": f"{base}/a.txt", "content": "new"})
+        self._invoke("write_text_file", {"path": f"{base}/b.txt", "content": "old-content"})
+        _, copied = self._invoke(
+            "copy_item",
+            {"source_path": f"{base}/a.txt", "destination_path": f"{base}/b.txt", "overwrite": True},
+        )
+        self.assertTrue(copied["overwritten"])
+        self.assertEqual(self._read(f"{base}/b.txt"), "new")
+
+        self._invoke("write_text_file", {"path": f"{base}/c.txt", "content": "moved"})
+        _, moved = self._invoke(
+            "move_item",
+            {"source_path": f"{base}/c.txt", "destination_path": f"{base}/b.txt", "overwrite": True},
+        )
+        self.assertTrue(moved["overwritten"])
+        self.assertEqual(self._read(f"{base}/b.txt"), "moved")
+        self.assertFalse(self._invoke("stat_item", {"path": f"{base}/c.txt"})[1]["exists"])
+
+        # Overwriting a directory replaces it rather than merging into it.
+        self._invoke("write_text_file", {"path": f"{base}/src/a.txt", "content": "A"})
+        self._invoke("write_text_file", {"path": f"{base}/dst/stale.txt", "content": "S"})
+        self._invoke(
+            "copy_item",
+            {"source_path": f"{base}/src", "destination_path": f"{base}/dst", "overwrite": True},
+        )
+        _, listed = self._invoke("list_files", {"path": f"{base}/dst"})
+        self.assertEqual([e["name"] for e in listed["entries"]], ["a.txt"])
+
+        # A file must never replace a directory (or the reverse), even with overwrite.
+        for src, dst in ((f"{base}/a.txt", f"{base}/dst"), (f"{base}/dst", f"{base}/a.txt")):
+            with self.subTest(src=src, dst=dst):
+                with self.assertRaisesRegex(ValueError, "Cannot replace existing"):
+                    self._invoke(
+                        "move_item", {"source_path": src, "destination_path": dst, "overwrite": True}
+                    )
+        self.assertEqual(self._read(f"{base}/dst/a.txt"), "A")
+        self.assertEqual(self._read(f"{base}/a.txt"), "new")
+
+    def test_create_parents_disabled_never_creates_directories(self) -> None:
+        src = f"{self.folder}/src.txt"
+        self._invoke("write_text_file", {"path": src, "content": "x"})
+        missing = f"{self.folder}/missing"
+        for tool, params in (
+            ("write_text_file", {"path": f"{missing}/w.txt", "content": "x"}),
+            ("upload_file", {"path": f"{missing}/u.pdf", "file": self._pdf_file()}),
+            ("copy_item", {"source_path": src, "destination_path": f"{missing}/c.txt"}),
+            ("move_item", {"source_path": src, "destination_path": f"{missing}/m.txt"}),
+        ):
+            with self.subTest(tool=tool):
+                with self.assertRaisesRegex(ValueError, "create_parents is disabled"):
+                    self._invoke(tool, {**params, "create_parents": False})
+        self.assertFalse(self._invoke("stat_item", {"path": missing})[1]["exists"])
+        self.assertTrue(self._invoke("stat_item", {"path": src})[1]["exists"])
+
+    def test_locked_file_is_left_untouched(self) -> None:
+        path = f"{self.folder}/busy.docx"
+        self._invoke("write_text_file", {"path": path, "content": "orig"})
+        raw = self.client._ensure_client()
+        url = self.client.item_url(path)
+        lock = raw.request(
+            "LOCK",
+            url,
+            headers={"Depth": "0", "Timeout": "Second-120", "Content-Type": "application/xml"},
+            content=LOCK_BODY,
+        )
+        if lock.status_code in (405, 501):
+            self.skipTest("Server does not support LOCK.")
+        self.assertEqual(lock.status_code, 200)
+        token = lock.headers["lock-token"]
+        try:
+            for tool, params in (
+                ("write_text_file", {"path": path, "content": "changed", "mode": "overwrite"}),
+                ("delete_item", {"path": path}),
+                ("move_item", {"source_path": path, "destination_path": f"{self.folder}/x.docx"}),
+            ):
+                with self.subTest(tool=tool):
+                    with self.assertRaisesRegex(ValueError, "HTTP 423"):
+                        self._invoke(tool, params)
+            self.assertEqual(self._read(path), "orig")
+        finally:
+            raw.request("UNLOCK", url, headers={"Lock-Token": token})
+
+    def test_empty_file_dotfile_and_name_length_limit(self) -> None:
+        empty = f"{self.folder}/empty.txt"
+        _, written = self._invoke("write_text_file", {"path": empty, "content": ""})
+        self.assertEqual(written["size"], 0)
+        self.assertEqual(self._invoke("stat_item", {"path": empty})[1]["size"], 0)
+        self.assertEqual(self._read(empty), "")
+        messages, downloaded = self._invoke("download_file", {"path": empty})
+        blob = next(m for m in messages if m.type == InvokeMessage.MessageType.BLOB)
+        self.assertEqual(blob.message.blob, b"")
+        self.assertEqual(downloaded["size"], 0)
+
+        # nginx hides dot entries from PROPFIND listings, so only direct access is checked.
+        dotfile = f"{self.folder}/.config/.env.sample"
+        self._invoke("write_text_file", {"path": dotfile, "content": "K=V"})
+        self.assertTrue(self._invoke("stat_item", {"path": dotfile})[1]["exists"])
+        self.assertEqual(self._read(dotfile), "K=V")
+
+        cjk = "\u540d"
+        long_ok = f"{self.folder}/{cjk * 83}.txt"  # 253 bytes
+        self._invoke("write_text_file", {"path": long_ok, "content": "long"})
+        self.assertEqual(self._read(long_ok), "long")
+        with self.assertRaisesRegex(ValueError, "longer than 255 bytes"):
+            self._invoke("write_text_file", {"path": f"{self.folder}/{cjk * 86}.txt", "content": "x"})
+
+    def test_error_paths_and_truncated_read(self) -> None:
+        base = self.folder
+        self._invoke("write_text_file", {"path": f"{base}/dir/a.txt", "content": "a" * 150})
+        for tool, params, pattern in (
+            ("download_file", {"path": f"{base}/dir"}, "is a directory"),
+            ("read_text_file", {"path": f"{base}/nope.txt"}, "does not exist"),
+            ("list_files", {"path": f"{base}/nope"}, "404|does not exist"),
+            ("get_properties", {"path": f"{base}/nope"}, "does not exist"),
+            ("set_properties", {"path": f"{base}/nope", "properties": '{"a": "1"}'}, "does not exist"),
+            ("move_item", {"source_path": f"{base}/nope", "destination_path": f"{base}/x"}, "does not exist"),
+            ("delete_item", {"path": f"{base}/nope"}, "does not exist"),
+        ):
+            with self.subTest(tool=tool):
+                with self.assertRaisesRegex(ValueError, pattern):
+                    self._invoke(tool, params)
+
+        _, read = self._invoke("read_text_file", {"path": f"{base}/dir/a.txt", "max_chars": 100})
+        self.assertEqual(read["content"], "a" * 100)
+        self.assertEqual(read["total_chars"], 150)
+        self.assertTrue(read["truncated"])
+
+    def test_listing_many_entries(self) -> None:
+        folder = f"{self.folder}/many"
+        names = [f"item-{i:03d}.txt" for i in range(40)]
+        for name in names:
+            self.client.write_text(f"{folder}/{name}", name)
+        self.client.create_directory(f"{folder}/zz-subdir")
+
+        _, listed = self._invoke("list_files", {"path": folder})
+        self.assertEqual(listed["count"], 41)
+        self.assertFalse(listed["truncated"])
+        self.assertEqual([e["name"] for e in listed["entries"]], ["zz-subdir", *names])
+        self.assertTrue(all(e["size"] == len(e["name"]) for e in listed["entries"][1:]))
+
+        _, capped = self._invoke("list_files", {"path": folder, "entry_type": "file", "limit": 15})
+        self.assertEqual([e["name"] for e in capped["entries"]], names[:15])
+        self.assertEqual(capped["truncated_reason"], "limit")

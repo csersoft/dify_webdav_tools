@@ -1,0 +1,100 @@
+identity:
+  author: csersoft
+  name: set_properties
+  label:
+    en_US: Set Properties
+    zh_Hans: 设置属性
+description:
+  human:
+    en_US: Set or remove custom properties on an existing WebDAV file or directory via PROPPATCH, then read them back to confirm the server actually stored them. Requires a server that supports custom (dead) properties, such as Nextcloud, ownCloud, or Apache mod_dav.
+    zh_Hans: 通过 PROPPATCH 为已存在的 WebDAV 文件或目录设置或删除自定义属性，并在写入后读回确认服务器确实已保存。需要服务器支持自定义属性（如 Nextcloud、ownCloud、Apache mod_dav）。
+  llm: Set and/or remove custom properties (metadata such as tags or review status) on an existing WebDAV file or directory. Values are plain text. The change is atomic and verified by reading the properties back.
+parameters:
+  - name: path
+    type: string
+    required: true
+    label:
+      en_US: Relative Path
+      zh_Hans: 相对路径
+    human_description:
+      en_US: Relative path of an existing file or directory ('/' for the WebDAV root).
+      zh_Hans: 已存在的文件或目录的相对路径（'/' 表示 WebDAV 根目录）。
+    llm_description: Relative path of the existing file or directory to update.
+    form: llm
+  - name: properties
+    type: string
+    required: false
+    label:
+      en_US: Properties to Set (JSON)
+      zh_Hans: 要设置的属性（JSON）
+    human_description:
+      en_US: JSON object of property name to text value, e.g. {"category":"report","reviewed":"true"}. Use '{namespace}name' keys for other namespaces.
+      zh_Hans: 属性名到文本值的 JSON 对象，例如 {"category":"report","reviewed":"true"}；其他命名空间的属性可用 '{namespace}name' 作为键。
+    llm_description: 'JSON object mapping property names to string, number, or boolean values, e.g. {"category": "report"}.'
+    form: llm
+  - name: remove
+    type: string
+    required: false
+    label:
+      en_US: Properties to Remove
+      zh_Hans: 要删除的属性
+    human_description:
+      en_US: Comma-separated names or a JSON array of properties to remove. Removing a property that does not exist is not an error.
+      zh_Hans: 要删除的属性名，以逗号分隔或 JSON 数组；删除不存在的属性不会报错。
+    llm_description: Optional comma-separated property names or JSON array to remove.
+    form: llm
+  - name: namespace
+    type: string
+    required: false
+    default: urn:dify:webdav-tools
+    label:
+      en_US: Property Namespace
+      zh_Hans: 属性命名空间
+    human_description:
+      en_US: XML namespace applied to plain property names (default 'urn:dify:webdav-tools'). Properties in the 'DAV:' namespace are server-managed and cannot be changed.
+      zh_Hans: 不带命名空间的属性名所使用的 XML 命名空间（默认 'urn:dify:webdav-tools'）。'DAV:' 命名空间的属性由服务器维护，不允许修改。
+    llm_description: XML namespace for plain property names; defaults to 'urn:dify:webdav-tools'.
+    form: llm
+  - name: verify
+    type: boolean
+    required: false
+    default: true
+    label:
+      en_US: Verify by Reading Back
+      zh_Hans: 写入后读回校验
+    human_description:
+      en_US: Read the properties back after PROPPATCH and fail if the server did not store them (some servers, such as rclone, acknowledge PROPPATCH without saving).
+      zh_Hans: PROPPATCH 后读回属性，若服务器未真正保存则报错（部分服务器如 rclone 会返回成功但实际不保存）。
+    llm_description: Whether to verify the change by reading the properties back.
+    form: form
+output_schema:
+  type: object
+  properties:
+    path:
+      type: string
+      description: Normalized relative path
+    type:
+      type: string
+      description: Resource type ('file' or 'directory')
+    namespace:
+      type: string
+      description: Namespace used for plain property names
+    set:
+      type: array
+      description: Properties that were set
+      items:
+        type: string
+    removed:
+      type: array
+      description: Properties that were removed
+      items:
+        type: string
+    verified:
+      type: boolean
+      description: Whether the change was confirmed by reading the properties back
+    values:
+      type: object
+      description: Values written, keyed by plain name (default namespace) or '{namespace}name'
+extra:
+  python:
+    source: tools/set_properties.py

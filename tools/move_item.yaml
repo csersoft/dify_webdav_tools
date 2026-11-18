@@ -40,9 +40,9 @@ parameters:
       en_US: Overwrite Destination
       zh_Hans: 覆盖目标同名项
     human_description:
-      en_US: Allow replacing an existing resource at the destination path.
-      zh_Hans: 开启后允许覆盖目标路径上已存在的同名文件或目录。
-    llm_description: Allow overwriting an existing item at destination_path.
+      en_US: Allow replacing an existing resource of the same type at the destination path (a file never replaces a directory, or vice versa).
+      zh_Hans: 开启后允许覆盖目标路径上已存在的同类型文件或目录（文件不会覆盖目录，目录也不会覆盖文件）。
+    llm_description: Allow overwriting an existing item of the same type at destination_path; a file never replaces a directory or vice versa.
     form: form
   - name: create_parents
     type: boolean
@@ -52,9 +52,9 @@ parameters:
       en_US: Auto-Create Destination Parents
       zh_Hans: 自动创建目标父目录
     human_description:
-      en_US: Automatically create missing parent directories of Destination Relative Path.
-      zh_Hans: 若目标路径的上级父目录不存在，自动递归创建。
-    llm_description: Automatically create missing parent directories for destination_path.
+      en_US: Automatically create missing parent directories of Destination Relative Path. When disabled, moving fails if the destination's parent directory does not exist.
+      zh_Hans: 若目标路径的上级父目录不存在，自动递归创建。关闭后，目标父目录不存在时移动失败。
+    llm_description: Automatically create missing parent directories for destination_path. When false, the move fails if the destination's parent directory does not exist.
     form: form
 output_schema:
   type: object

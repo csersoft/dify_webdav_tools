@@ -17,8 +17,8 @@ parameters:
       en_US: Relative File Path
       zh_Hans: 文件相对路径
     human_description:
-      en_US: Relative path to the file on the WebDAV server (up to 64 MiB).
-      zh_Hans: WebDAV 服务器上的文件相对路径（单文件最大 64 MiB）。
+      en_US: Relative path to the file on the WebDAV server (limited by the provider's Max File Size setting, 50 MiB by default).
+      zh_Hans: WebDAV 服务器上的文件相对路径（受凭据中"单文件大小上限"限制，默认 50 MiB）。
     llm_description: Relative path to the file to download from WebDAV.
     form: llm
 output_schema:

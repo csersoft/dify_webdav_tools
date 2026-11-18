@@ -35,24 +35,24 @@ parameters:
   - name: mode
     type: select
     required: false
-    default: overwrite
+    default: create
     label:
       en_US: Write Mode
       zh_Hans: 写入模式
     human_description:
-      en_US: Choose 'overwrite' (create or replace), 'create' (fail if file exists), or 'append' (append to existing file).
-      zh_Hans: 选择写入模式：覆盖写入（不存在则新建）、仅新建（已存在则报错）或追加写入（在末尾追加内容）。
-    llm_description: Write mode ('overwrite', 'create', or 'append').
+      en_US: Choose 'create' (default; fail if the file exists), 'overwrite' (create or replace), or 'append' (append to the end, creating the file if missing).
+      zh_Hans: 选择写入模式：仅新建（默认，已存在则报错）、覆盖写入（不存在则新建）或追加写入（在末尾追加，不存在则新建）。
+    llm_description: "Write mode: 'create' (default) fails if the file already exists; 'append' adds to the end of the file; 'overwrite' permanently replaces the existing content, so use it only when the user explicitly wants to replace the file."
     form: llm
     options:
-      - value: overwrite
-        label:
-          en_US: Overwrite (Create or Replace)
-          zh_Hans: 覆盖写入（不存在则新建）
       - value: create
         label:
           en_US: Create Only (Do Not Overwrite)
           zh_Hans: 仅新建（禁止覆盖已有文件）
+      - value: overwrite
+        label:
+          en_US: Overwrite (Create or Replace)
+          zh_Hans: 覆盖写入（不存在则新建）
       - value: append
         label:
           en_US: Append to End
@@ -88,9 +88,9 @@ parameters:
       en_US: Auto-Create Parent Directories
       zh_Hans: 自动创建父目录
     human_description:
-      en_US: Automatically create missing parent directories via MKCOL before writing.
-      zh_Hans: 写入前若目标父目录不存在，自动通过 MKCOL 递归创建。
-    llm_description: Automatically create missing parent directories.
+      en_US: Automatically create missing parent directories via MKCOL before writing. When disabled, writing fails if the parent directory does not exist.
+      zh_Hans: 写入前若目标父目录不存在，自动通过 MKCOL 递归创建。关闭后，父目录不存在时写入失败。
+    llm_description: Automatically create missing parent directories. When false, the write fails if the parent directory does not exist.
     form: form
 output_schema:
   type: object
@@ -109,7 +109,7 @@ output_schema:
       description: Content-Type stored for the file
     etag:
       type: string
-      description: New ETag returned by the server
+      description: ETag of the written file, taken from the PUT response or fetched via PROPFIND/HEAD when the server omits it; may be a weak ETag (W/ prefix) right after the write
     created_parents:
       type: boolean
       description: Whether missing parent directories were created

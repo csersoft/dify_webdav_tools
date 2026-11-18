@@ -1,4 +1,4 @@
-version: 0.1.0
+version: 0.2.0
 type: plugin
 author: csersoft
 name: webdav_tools
@@ -8,14 +8,14 @@ label:
   ja_JP: WebDAV Tools
   pt_BR: WebDAV Tools
 description:
-  en_US: Full-featured WebDAV client tools to browse, inspect, read, write, upload, download, move, copy, and delete remote files and directories
-  zh_Hans: 功能完整的 WebDAV 客户端工具集，支持浏览目录、探测属性、读写文本、上传下载文件，以及创建目录、移动、复制与删除
-  ja_JP: Full-featured WebDAV client tools to browse, inspect, read, write, upload, download, move, copy, and delete remote files and directories
-  pt_BR: Full-featured WebDAV client tools to browse, inspect, read, write, upload, download, move, copy, and delete remote files and directories
+  en_US: Full-featured WebDAV client tools to check server status, browse, inspect, read, write, upload, download, move, copy, and delete remote files and directories, and read or set custom properties
+  zh_Hans: 功能完整的 WebDAV 客户端工具集，支持服务器状态检查、浏览目录、探测属性、读写文本、上传下载文件、创建目录、移动、复制与删除，以及读取和设置自定义属性
+  ja_JP: Full-featured WebDAV client tools to check server status, browse, inspect, read, write, upload, download, move, copy, and delete remote files and directories, and read or set custom properties
+  pt_BR: Full-featured WebDAV client tools to check server status, browse, inspect, read, write, upload, download, move, copy, and delete remote files and directories, and read or set custom properties
 icon: icon.svg
 icon_dark: icon-dark.svg
 resource:
-  memory: 536870912
+  memory: 402653184
   permission: {}
 plugins:
   tools:

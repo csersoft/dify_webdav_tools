@@ -28,8 +28,8 @@ parameters:
       en_US: Source File
       zh_Hans: 源文件
     human_description:
-      en_US: Single file variable from an upstream Dify node (up to 64 MiB).
-      zh_Hans: 选择来自上游节点的单个 Dify 文件变量（最大 64 MiB）。
+      en_US: Single file variable from an upstream Dify node (limited by the provider's Max File Size setting, 50 MiB by default).
+      zh_Hans: 选择来自上游节点的单个 Dify 文件变量（受凭据中"单文件大小上限"限制，默认 50 MiB）。
     llm_description: Upstream Dify file object to upload.
     form: llm
   - name: overwrite
@@ -52,9 +52,9 @@ parameters:
       en_US: Auto-Create Parent Directories
       zh_Hans: 自动创建父目录
     human_description:
-      en_US: Automatically create missing parent directories via MKCOL before uploading.
-      zh_Hans: 上传前若目标父目录不存在，自动通过 MKCOL 递归创建。
-    llm_description: Automatically create missing parent folders before upload.
+      en_US: Automatically create missing parent directories via MKCOL before uploading. When disabled, uploading fails if the parent directory does not exist.
+      zh_Hans: 上传前若目标父目录不存在，自动通过 MKCOL 递归创建。关闭后，父目录不存在时上传失败。
+    llm_description: Automatically create missing parent folders before upload. When false, the upload fails if the parent directory does not exist.
     form: form
   - name: if_match_etag
     type: string
@@ -81,7 +81,7 @@ output_schema:
       description: Content-Type sent with PUT
     etag:
       type: string
-      description: New ETag returned by the WebDAV server
+      description: ETag of the uploaded file, taken from the PUT response or fetched via PROPFIND/HEAD when the server omits it; may be a weak ETag (W/ prefix) right after the upload
     created_parents:
       type: boolean
       description: Whether missing parent directories were created automatically

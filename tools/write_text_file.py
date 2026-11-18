@@ -12,7 +12,7 @@ class WriteTextFile(Tool):
         path = require_str(tool_parameters, "path")
         raw_content = tool_parameters.get("content")
         content = "" if raw_content is None else str(raw_content)
-        mode = tool_parameters.get("mode") or "overwrite"
+        mode = tool_parameters.get("mode") or "create"
         encoding = tool_parameters.get("encoding") or "utf-8"
         content_type = tool_parameters.get("content_type") or ""
         create_parents = as_bool(tool_parameters.get("create_parents"), default=True)

@@ -1,0 +1,96 @@
+identity:
+  author: csersoft
+  name: server_status
+  label:
+    en_US: Server Status
+    zh_Hans: 服务器状态
+description:
+  human:
+    en_US: Check WebDAV server connectivity, authentication, response time, server software/version, and capabilities (DAV compliance classes, allowed methods, locking, quota). Never modifies anything and does not fail on an unhealthy server.
+    zh_Hans: 检查 WebDAV 服务器的连通性、认证结果、响应时间、服务端软件与版本以及能力信息（DAV 协议等级、允许的方法、锁支持、存储配额）。不会修改任何内容，服务器异常时也不会报错中断。
+  llm: Check whether the configured WebDAV server is reachable and the credentials work, and report response time, server software and version, DAV compliance classes, allowed methods, locking support, and storage quota. Read-only; returns status 'ok', 'unauthorized', 'forbidden', 'not_found', 'not_webdav', 'unreachable', or 'error' instead of failing.
+parameters: []
+output_schema:
+  type: object
+  properties:
+    status:
+      type: string
+      description: Overall result ('ok', 'unauthorized', 'forbidden', 'not_found', 'not_webdav', 'unreachable', or 'error')
+    reachable:
+      type: boolean
+      description: Whether the server answered at the HTTP level
+    authenticated:
+      type: boolean
+      description: Whether the credentials were accepted and the root directory is accessible
+    message:
+      type: string
+      description: Human-readable explanation of the result
+    base_url:
+      type: string
+      description: Configured WebDAV root URL
+    effective_url:
+      type: string
+      description: Root URL after following same-origin redirects
+    http_status:
+      type: number
+      description: HTTP status code of the root PROPFIND (0 if not reached)
+    response_time_ms:
+      type: number
+      description: Total time of the OPTIONS and PROPFIND probes in milliseconds
+    options_ms:
+      type: number
+      description: OPTIONS round trip in milliseconds, including connection setup
+    propfind_ms:
+      type: number
+      description: Depth 0 PROPFIND round trip in milliseconds on the established connection
+    server:
+      type: string
+      description: Raw Server response header
+    server_product:
+      type: string
+      description: Server software name parsed from the Server header
+    server_version:
+      type: string
+      description: Server software version parsed from the Server header
+    dav_classes:
+      type: array
+      description: WebDAV compliance classes from the DAV header (e.g. '1', '2', '3')
+      items:
+        type: string
+    dav_extensions:
+      type: array
+      description: Non-numeric DAV header tokens such as 'access-control' or 'calendar-access'
+      items:
+        type: string
+    allowed_methods:
+      type: array
+      description: HTTP methods allowed on the root directory (Allow header)
+      items:
+        type: string
+    supports_locking:
+      type: boolean
+      description: Whether the server advertises WebDAV locking (class 2 or LOCK)
+    quota_available_bytes:
+      type: number
+      description: Free space in bytes reported by the server (-1 if not reported)
+    quota_used_bytes:
+      type: number
+      description: Used space in bytes reported by the server (-1 if not reported)
+    tls:
+      type: boolean
+      description: Whether the root URL uses HTTPS
+    verify_ssl:
+      type: boolean
+      description: Whether TLS certificate verification is enabled
+    read_only:
+      type: boolean
+      description: Whether the plugin is configured in read-only mode
+    max_file_size_mb:
+      type: number
+      description: Configured single-file size limit in MiB
+    checked_at:
+      type: string
+      description: UTC timestamp of the check (ISO 8601)
+extra:
+  python:
+    source: tools/server_status.py
