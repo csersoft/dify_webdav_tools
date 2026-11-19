@@ -1,4 +1,4 @@
-version: 0.2.1
+version: 0.2.2
 type: plugin
 author: csersoft
 name: webdav_tools
@@ -16,6 +16,9 @@ description:
   pt_BR: Full-featured WebDAV client tools to check server status, browse, inspect, read, write, upload, download, move, copy, and delete remote files and directories, and read or set custom properties
 icon: icon.svg
 icon_dark: icon-dark.svg
+tags:
+  - utilities
+  - productivity
 resource:
   memory: 402653184
   permission: {}

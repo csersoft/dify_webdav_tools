@@ -1,12 +1,4 @@
-# WebDAV 工具集（`csersoft/webdav_tools`）
-
-适用于 Dify 工作流（Workflow）、对话流（Chatflow）与智能体（Agent）的 WebDAV 客户端**工具类（Tools）**插件，区别于知识库数据源类的 WebDAV 插件。
-
-界面支持中英双语（`en_US` / `zh_Hans`），支持 Basic、Digest、Bearer 三种认证方式、只读模式、可配置的单文件大小上限、自签名证书开关、反向代理路径兼容，并为每个工具声明了结构化 `output_schema` 输出变量。
-
-- 源码：https://github.com/csersoft/dify_webdav_tools
-- 联系：csersoft@qq.com
-- English documentation: [README.md](README.md)
+# WebDAV 工具集参考与开发指南
 
 ## 内置工具
 
